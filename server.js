@@ -18,7 +18,9 @@ app.use((req, res, next) => {
 
 // Auth
 app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
+  const rawUser = req.body?.username || '';
+  const username = String(rawUser).trim().toLowerCase();
+  const password = req.body?.password || '';
   const sql = 'SELECT * FROM users WHERE username = ?';
   db.get(sql, [username], (err, user) => {
     if (err) return res.status(500).json({ success: false, error: 'db' });
@@ -68,7 +70,7 @@ app.get('/api/products', (req, res) => {
 app.post('/api/products', (req, res) => {
   const { name, price, stock, category } = req.body;
   const sql = 'INSERT INTO products (name, price, stock, category) VALUES (?, ?, ?, ?)';
-  db.run(sql, [name, price, stock, category], function(err) {
+  db.run(sql, [name, Math.round(Number(price)||0), parseInt(stock)||0, category], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, id: this.lastID });
   });
@@ -78,7 +80,7 @@ app.put('/api/products/:id', (req, res) => {
   const { name, price, stock, category } = req.body;
   const { id } = req.params;
   const sql = 'UPDATE products SET name = ?, price = ?, stock = ?, category = ? WHERE id = ?';
-  db.run(sql, [name, price, stock, category, id], function(err) {
+  db.run(sql, [name, Math.round(Number(price)||0), parseInt(stock)||0, category, id], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, changes: this.changes });
   });
@@ -121,6 +123,39 @@ app.get('/api/tables/free', (req, res) => {
   });
 });
 
+// Tables CRUD
+app.post('/api/tables', (req, res) => {
+  const { name, type = 'table', capacity = 4 } = req.body;
+  if (!name) return res.status(400).json({ success: false, error: 'Nombre requerido' });
+  const sql = 'INSERT INTO tables (name, type, capacity) VALUES (?, ?, ?)';
+  db.run(sql, [name, type, parseInt(capacity)||4], function(err) {
+    if (err) return res.status(500).json({ success: false, error: err.message });
+    res.json({ success: true, id: this.lastID });
+  });
+});
+
+app.put('/api/tables/:id', (req, res) => {
+  const { id } = req.params;
+  const { name, type = 'table', capacity = 4, status } = req.body;
+  const fields = ['name = ?', 'type = ?', 'capacity = ?'];
+  const params = [name, type, parseInt(capacity)||4];
+  if (status) { fields.push('status = ?'); params.push(status); }
+  params.push(id);
+  const sql = `UPDATE tables SET ${fields.join(', ')}, created_at = created_at WHERE id = ?`;
+  db.run(sql, params, function(err) {
+    if (err) return res.status(500).json({ success: false, error: err.message });
+    res.json({ success: true, changes: this.changes });
+  });
+});
+
+app.delete('/api/tables/:id', (req, res) => {
+  const { id } = req.params;
+  db.run('DELETE FROM tables WHERE id = ?', [id], function(err) {
+    if (err) return res.status(500).json({ success: false, error: err.message });
+    res.json({ success: true, changes: this.changes });
+  });
+});
+
 app.get('/api/tables/:id/order', (req, res) => {
   const { id } = req.params;
   const sql = `
@@ -140,13 +175,14 @@ app.post('/api/sales/process', (req, res) => {
   const saleData = req.body;
   db.serialize(() => {
     db.run('BEGIN TRANSACTION;');
-    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, status, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`;
+    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`;
     const tableId = saleData.tableId;
     const saleType = tableId ? 'table' : 'direct';
+    const payment = saleData.payment_method || 'cash';
     const status = 'paid';
 
     const proceedWithInsert = () => {
-      db.run(saleSql, [1, tableId, saleData.total, saleType, status], function(err) {
+      db.run(saleSql, [1, tableId, Math.round(Number(saleData.total)||0), saleType, payment, status], function(err) {
         if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
         const saleId = this.lastID;
         const itemsSql = `INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`;
@@ -162,8 +198,8 @@ app.post('/api/sales/process', (req, res) => {
             if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
             itemsProcessed++;
             if (itemsProcessed === totalItems) {
-              const transSql = `INSERT INTO transactions (type, amount, description) VALUES ('income', ?, ?)`;
-              db.run(transSql, [saleData.total, `Venta ID: ${saleId}`], (err) => {
+              const transSql = `INSERT INTO transactions (type, amount, description, payment_method, created_by) VALUES ('income', ?, ?, ?, ?)`;
+              db.run(transSql, [Math.round(Number(saleData.total)||0), `Venta ID: ${saleId}`, payment, 1], (err) => {
                 if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
                 if (tableId) {
                   db.run(`UPDATE tables SET status = 'free' WHERE id = ?`, [tableId], (err) => {
@@ -204,12 +240,13 @@ app.post('/api/sales/save', (req, res) => {
   const orderData = req.body;
   db.serialize(() => {
     db.run('BEGIN TRANSACTION;');
-    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, status, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`;
+    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`;
     const tableId = orderData.tableId;
     const saleType = tableId ? 'table' : 'direct';
+    const payment = orderData.payment_method || 'cash';
     const status = 'pending';
-    const total = orderData.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-    db.run(saleSql, [1, tableId, total, saleType, status], function(err) {
+    const total = orderData.items.reduce((sum, item) => sum + (Math.round(Number(item.price)||0) * item.quantity), 0);
+    db.run(saleSql, [1, tableId, Math.round(Number(total)||0), saleType, payment, status], function(err) {
       if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
       const saleId = this.lastID;
       const itemsSql = `INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`;
@@ -241,32 +278,52 @@ app.post('/api/sales/save', (req, res) => {
 
 // Transactions & filters
 app.get('/api/transactions', (req, res) => {
-  const { from, to, type } = req.query;
-  let sql = 'SELECT * FROM transactions WHERE 1=1';
+  const { from, to, type, payment } = req.query;
+  let sql = 'SELECT t.*, u.username as created_by_username FROM transactions t LEFT JOIN users u ON t.created_by = u.id WHERE 1=1';
   const params = [];
-  if (type) { sql += ' AND type = ?'; params.push(type); }
-  if (from) { sql += ' AND DATE(created_at) >= ?'; params.push(from); }
-  if (to) { sql += ' AND DATE(created_at) <= ?'; params.push(to); }
-  sql += ' ORDER BY created_at DESC';
+  if (type) { sql += ' AND t.type = ?'; params.push(type); }
+  if (payment) { sql += ' AND t.payment_method = ?'; params.push(payment); }
+  if (from) { sql += ' AND DATE(t.created_at) >= ?'; params.push(from); }
+  if (to) { sql += ' AND DATE(t.created_at) <= ?'; params.push(to); }
+  sql += ' ORDER BY t.created_at DESC';
   db.all(sql, params, (err, rows) => {
     if (err) return res.status(500).json([]);
     res.json(rows);
   });
 });
 
+// Cash summary (for suggested closing amount)
+app.get('/api/cash/summary', (req, res) => {
+  // Get last open session and compute cash movements since then
+  db.get("SELECT id, opening_balance, opened_at FROM cash_sessions WHERE status = 'open' ORDER BY opened_at DESC LIMIT 1", [], (err, open) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!open) return res.json({ hasOpen: false });
+    const opening = Number(open.opening_balance || 0);
+    const since = open.opened_at;
+    const sql = "SELECT type, payment_method, amount FROM transactions WHERE datetime(created_at) >= datetime(?)";
+    db.all(sql, [since], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      const cashIncome = rows.filter(r => r.type === 'income' && r.payment_method === 'cash').reduce((s, r) => s + Number(r.amount||0), 0);
+      const cashExpense = rows.filter(r => r.type === 'expense' && r.payment_method === 'cash').reduce((s, r) => s + Number(r.amount||0), 0);
+      const suggestedClose = opening + cashIncome - cashExpense;
+      res.json({ hasOpen: true, opening, cashIncome, cashExpense, suggestedClose });
+    });
+  });
+});
+
 app.post('/api/transactions/income', (req, res) => {
-  const { description, amount } = req.body;
-  const sql = "INSERT INTO transactions (type, description, amount) VALUES ('income', ?, ?)";
-  db.run(sql, [description, amount], function(err) {
+  const { description, amount, user_id } = req.body;
+  const sql = "INSERT INTO transactions (type, description, amount, created_by) VALUES ('income', ?, ?, ?)";
+  db.run(sql, [description, Math.round(Number(amount)||0), user_id || 1], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, id: this.lastID });
   });
 });
 
 app.post('/api/transactions/expense', (req, res) => {
-  const { description, amount } = req.body;
-  const sql = "INSERT INTO transactions (type, description, amount) VALUES ('expense', ?, ?)";
-  db.run(sql, [description, amount], function(err) {
+  const { description, amount, user_id } = req.body;
+  const sql = "INSERT INTO transactions (type, description, amount, created_by) VALUES ('expense', ?, ?, ?)";
+  db.run(sql, [description, Math.round(Number(amount)||0), user_id || 1], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, id: this.lastID });
   });
@@ -338,6 +395,165 @@ app.post('/api/schedules', (req, res) => {
   db.run(sql, [userId, workDate, startTime, endTime], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, id: this.lastID });
+  });
+});
+
+// Users API
+app.get('/api/users', (req, res) => {
+  const sql = 'SELECT id, username, role, full_name, email, phone, is_active, created_at, last_login FROM users ORDER BY created_at DESC';
+  db.all(sql, [], (err, rows) => {
+    if (err) return res.status(500).json([]);
+    res.json(rows);
+  });
+});
+
+app.post('/api/users', (req, res) => {
+  const username = String(req.body?.username || '').trim().toLowerCase();
+  const password = req.body?.password;
+  const role = String(req.body?.role || '').trim();
+  const full_name = String(req.body?.full_name || '').trim();
+  const email = String(req.body?.email || '').trim();
+  const phone = String(req.body?.phone || '').trim();
+  
+  if (!username || !password || !role) {
+    return res.status(400).json({ success: false, error: 'Username, password and role are required' });
+  }
+  
+  bcrypt.hash(password, 10, (err, hash) => {
+    if (err) return res.status(500).json({ success: false, error: 'Error hashing password' });
+    
+    const sql = 'INSERT INTO users (username, password, role, full_name, email, phone) VALUES (?, ?, ?, ?, ?, ?)';
+    db.run(sql, [username, hash, role || 'employee', full_name, email, phone], function(err) {
+      if (err) {
+        if (err.message.includes('UNIQUE constraint failed')) {
+          return res.status(400).json({ success: false, error: 'Username already exists' });
+        }
+        return res.status(500).json({ success: false, error: err.message });
+      }
+      res.json({ success: true, id: this.lastID });
+    });
+  });
+});
+
+// Check username availability
+app.get('/api/users/check-username', (req, res) => {
+  const username = String(req.query.username || '').trim().toLowerCase();
+  const excludeId = req.query.excludeId ? parseInt(req.query.excludeId) : null;
+  if (!username) return res.json({ available: false });
+  const sql = excludeId
+    ? 'SELECT COUNT(1) as cnt FROM users WHERE username = ? AND id != ?'
+    : 'SELECT COUNT(1) as cnt FROM users WHERE username = ?';
+  const params = excludeId ? [username, excludeId] : [username];
+  db.get(sql, params, (err, row) => {
+    if (err) return res.status(500).json({ available: false });
+    res.json({ available: (row?.cnt || 0) === 0 });
+  });
+});
+
+app.put('/api/users/:id', (req, res) => {
+  const { id } = req.params;
+  const username = String(req.body?.username || '').trim().toLowerCase();
+  const password = req.body?.password;
+  const role = String(req.body?.role || '').trim();
+  const full_name = String(req.body?.full_name || '').trim();
+  const email = String(req.body?.email || '').trim();
+  const phone = String(req.body?.phone || '').trim();
+  
+  if (!username || !role) {
+    return res.status(400).json({ success: false, error: 'Username and role are required' });
+  }
+  
+  // Prevent non-super admins from editing super_admin users
+  db.get('SELECT role FROM users WHERE id = ?', [id], (err, target) => {
+    if (err) return res.status(500).json({ success: false, error: err.message });
+    if (!target) return res.status(404).json({ success: false, error: 'User not found' });
+    if (target.role === 'super_admin' && role !== 'super_admin') {
+      return res.status(403).json({ success: false, error: 'No se puede modificar un super admin' });
+    }
+
+  if (password) {
+    // Update with new password
+    bcrypt.hash(password, 10, (err, hash) => {
+      if (err) return res.status(500).json({ success: false, error: 'Error hashing password' });
+      
+      const sql = 'UPDATE users SET username = ?, password = ?, role = ?, full_name = ?, email = ?, phone = ?, updated_at = datetime("now") WHERE id = ?';
+      db.run(sql, [username, hash, role, full_name, email, phone, id], function(err) {
+        if (err) {
+          if (err.message.includes('UNIQUE constraint failed')) {
+            return res.status(400).json({ success: false, error: 'Username already exists' });
+          }
+          return res.status(500).json({ success: false, error: err.message });
+        }
+        res.json({ success: true, changes: this.changes });
+      });
+    });
+  } else {
+    // Update without changing password
+    const sql = 'UPDATE users SET username = ?, role = ?, full_name = ?, email = ?, phone = ?, updated_at = datetime("now") WHERE id = ?';
+    db.run(sql, [username, role, full_name, email, phone, id], function(err) {
+      if (err) {
+        if (err.message.includes('UNIQUE constraint failed')) {
+          return res.status(400).json({ success: false, error: 'Username already exists' });
+        }
+        return res.status(500).json({ success: false, error: err.message });
+      }
+      res.json({ success: true, changes: this.changes });
+    });
+  }
+  });
+});
+
+// Reset password (admin)
+app.post('/api/users/:id/reset-password', (req, res) => {
+  const { id } = req.params;
+  const newPassword = String(req.body?.new_password || '');
+  if (!newPassword || newPassword.length < 4) {
+    return res.status(400).json({ success: false, error: 'Nueva contraseña inválida' });
+  }
+  bcrypt.hash(newPassword, 10, (err, hash) => {
+    if (err) return res.status(500).json({ success: false, error: 'Error hashing password' });
+    db.run('UPDATE users SET password = ?, updated_at = datetime("now") WHERE id = ?', [hash, id], function(err) {
+      if (err) return res.status(500).json({ success: false, error: err.message });
+      res.json({ success: true, changes: this.changes });
+    });
+  });
+});
+
+app.delete('/api/users/:id', (req, res) => {
+  const { id } = req.params;
+  
+  // Check if user is super_admin
+  db.get('SELECT role FROM users WHERE id = ?', [id], (err, user) => {
+    if (err) return res.status(500).json({ success: false, error: err.message });
+    if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+    if (user.role === 'super_admin') {
+      return res.status(400).json({ success: false, error: 'Cannot delete super admin user' });
+    }
+    
+    const sql = 'DELETE FROM users WHERE id = ?';
+    db.run(sql, [id], function(err) {
+      if (err) return res.status(500).json({ success: false, error: err.message });
+      res.json({ success: true, changes: this.changes });
+    });
+  });
+});
+
+app.put('/api/users/:id/toggle-status', (req, res) => {
+  const { id } = req.params;
+  
+  // Check if user is super_admin
+  db.get('SELECT role FROM users WHERE id = ?', [id], (err, user) => {
+    if (err) return res.status(500).json({ success: false, error: err.message });
+    if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+    if (user.role === 'super_admin') {
+      return res.status(400).json({ success: false, error: 'Cannot deactivate super admin user' });
+    }
+    
+    const sql = 'UPDATE users SET is_active = NOT is_active, updated_at = datetime("now") WHERE id = ?';
+    db.run(sql, [id], function(err) {
+      if (err) return res.status(500).json({ success: false, error: err.message });
+      res.json({ success: true, changes: this.changes });
+    });
   });
 });
 

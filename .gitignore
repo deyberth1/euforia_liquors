@@ -1,0 +1,38 @@
+# Node/Electron
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+
+# Build artifacts
+/dist/
+/out/
+/build/
+/*.log
+
+# Electron cache
+.electron/
+.electron-gyp/
+
+# Environment files
+.env
+.env.*
+
+# SQLite databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+
+# OS junk
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# Coverage
+coverage/
+
+# Misc
+*.local

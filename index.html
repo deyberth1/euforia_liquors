@@ -155,6 +155,11 @@
             text-transform: uppercase;
             letter-spacing: 2px;
         }
+        .current-user-label {
+            margin-top: 6px;
+            color: #b0b0b0;
+            font-size: 0.85em;
+        }
 
         .nav-menu {
             flex: 1;
@@ -511,6 +516,13 @@
             display: none !important;
         }
 
+        /* App Modals */
+        .app-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: none; align-items: center; justify-content: center; z-index: 2000; }
+        .app-modal .box { background: #1a1a1a; border: 2px solid #d4af37; border-radius: 12px; width: 90%; max-width: 480px; padding: 20px; }
+        .app-modal .title { color: #d4af37; font-size: 1.2em; margin-bottom: 10px; }
+        .app-modal .message { color: #dcdcdc; margin-bottom: 16px; }
+        .app-modal .actions { display:flex; gap: 10px; justify-content: flex-end; }
+
         #login-error {
             color: #e74c3c;
             margin-top: 15px;
@@ -541,6 +553,224 @@
         .stat-label {
             color: #b0b0b0;
             font-size: 0.9em;
+        }
+
+        /* Users Module Styles */
+        .users-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .user-card {
+            background: #2a2a2a;
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .user-card:hover {
+            border-color: #d4af37;
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(212, 175, 55, 0.2);
+        }
+
+        .user-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .user-name {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: white;
+        }
+
+        .user-role {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: 500;
+            text-transform: uppercase;
+        }
+
+        .role-super_admin {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .role-admin {
+            background: #f39c12;
+            color: white;
+        }
+
+        .role-manager {
+            background: #3498db;
+            color: white;
+        }
+
+        .role-employee {
+            background: #27ae60;
+            color: white;
+        }
+
+        .user-info {
+            margin-bottom: 15px;
+        }
+
+        .user-info-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+
+        .user-info-label {
+            color: #b0b0b0;
+        }
+
+        .user-info-value {
+            color: white;
+        }
+
+        .user-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn-small {
+            padding: 8px 16px;
+            font-size: 0.8em;
+            border-radius: 6px;
+        }
+
+        .btn-edit {
+            background: #3498db;
+            color: white;
+            border: none;
+        }
+
+        .btn-delete {
+            background: #e74c3c;
+            color: white;
+            border: none;
+        }
+
+        .btn-toggle {
+            background: #f39c12;
+            color: white;
+            border: none;
+        }
+
+        /* User Form Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.8);
+        }
+
+        .modal-content {
+            background: #1a1a1a;
+            margin: 5% auto;
+            padding: 30px;
+            border: 2px solid #d4af37;
+            border-radius: 15px;
+            width: 90%;
+            max-width: 500px;
+            position: relative;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.2);
+        }
+
+        .modal-header h3 {
+            color: #d4af37;
+            font-size: 1.5em;
+        }
+
+        .close {
+            color: #b0b0b0;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .close:hover {
+            color: #d4af37;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #b0b0b0;
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px 15px;
+            background: rgba(255,255,255,0.1);
+            border: 2px solid rgba(212, 175, 55, 0.3);
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #d4af37;
+            box-shadow: 0 0 15px rgba(212, 175, 55, 0.3);
+        }
+
+        .form-group input::placeholder {
+            color: #b0b0b0;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 15px;
+            justify-content: flex-end;
+            margin-top: 25px;
+        }
+
+        /* Responsive Layouts */
+        @media (max-width: 1024px) {
+            #sidebar { width: 220px; }
+            .page-header h2 { font-size: 2em; }
+            .pos-container { grid-template-columns: 1fr; height: auto; }
+        }
+
+        @media (max-width: 768px) {
+            #sidebar { width: 72px; }
+            .nav-item span:nth-child(2) { display: none; }
+            #main-content { padding: 15px; }
+            #login-form { width: 90%; padding: 30px 20px; }
+            .modal-content { width: 95%; padding: 20px; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .tables-container { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
         }
     </style>
 </head>
@@ -574,6 +804,7 @@
                     <div class="logo-subtitle">LIQUORS</div>
                 </div>
                 <h1>Sistema POS</h1>
+                <div class="current-user-label" id="current-user-label"></div>
             </div>
             
             <div class="nav-menu">
@@ -601,9 +832,17 @@
                     <span class="icon">📈</span>
                     <span>Reportes</span>
                 </div>
+                <div class="nav-item" onclick="showModule('users')">
+                    <span class="icon">👥</span>
+                    <span>Usuarios</span>
+                </div>
                 <div class="nav-item" onclick="showModule('settings')">
                     <span class="icon">⚙️</span>
                     <span>Configuración</span>
+                </div>
+                <div class="nav-item" onclick="logoutApp()">
+                    <span class="icon">🚪</span>
+                    <span>Cerrar Sesión</span>
                 </div>
             </div>
         </div>
@@ -691,6 +930,14 @@
                                 <option value="direct">Venta Directa</option>
                             </select>
                         </div>
+
+                        <div class="input-group">
+                            <label for="payment-method" style="color:#b0b0b0; margin-bottom:8px; display:block;">Método de Pago</label>
+                            <select id="payment-method" style="width:100%; padding:10px; background: rgba(255,255,255,0.1); border:2px solid rgba(212,175,55,0.3); border-radius:10px; color:white;">
+                                <option value="cash">Efectivo</option>
+                                <option value="transfer">Transferencia</option>
+                            </select>
+                        </div>
                         
                         <div class="order-items" id="order-items">
                             <!-- Items will be added here -->
@@ -725,6 +972,37 @@
                     </div>
                     <div class="tables-container"></div>
                 </div>
+
+                <!-- Admin Tables Management (solo Super Admin) -->
+                <div id="tables-admin-card" class="card hidden">
+                    <div class="card-header">
+                        <h3>Administrar Mesas</h3>
+                    </div>
+                    <div class="input-group" style="display:grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap:10px; align-items:center;">
+                        <input id="tbl-name" placeholder="Nombre (ej. Mesa 12)" />
+                        <select id="tbl-type">
+                            <option value="table">Mesa</option>
+                            <option value="bar">Barra</option>
+                        </select>
+                        <input id="tbl-cap" type="number" min="1" step="1" placeholder="Capacidad" />
+                        <button type="button" class="btn btn-primary" id="tbl-save">Guardar</button>
+                        <button type="button" class="btn btn-secondary hidden" id="tbl-cancel">Cancelar</button>
+                    </div>
+                    <div style="overflow:auto; margin-top:15px;">
+                        <table style="width:100%; border-collapse:collapse;">
+                            <thead>
+                                <tr>
+                                    <th style="text-align:left; padding:8px;">Nombre</th>
+                                    <th style="text-align:left; padding:8px;">Tipo</th>
+                                    <th style="text-align:right; padding:8px;">Capacidad</th>
+                                    <th style="text-align:left; padding:8px;">Estado</th>
+                                    <th style="padding:8px;">Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tbl-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
 
             <!-- Other modules -->
@@ -740,6 +1018,27 @@
                 <!-- Se renderiza dinámicamente desde renderer.js -->
             </div>
 
+            <!-- Users Module -->
+            <div id="users-module" class="module">
+                <div class="page-header">
+                    <div class="brand-logo">
+                        <div class="logo-text">EUFORIA</div>
+                        <div class="logo-subtitle">LIQUORS</div>
+                    </div>
+                    <h2>Gestión de Usuarios</h2>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Lista de Usuarios</h3>
+                        <button class="btn btn-primary" onclick="showUserForm()">+ Nuevo Usuario</button>
+                    </div>
+                    <div id="users-list">
+                        <!-- Users will be loaded here -->
+                    </div>
+                </div>
+            </div>
+
             <div id="settings-module" class="module">
                 <div class="page-header">
                     <div class="brand-logo">
@@ -752,6 +1051,74 @@
                     <p style="color: #b0b0b0;">Módulo de configuración en desarrollo...</p>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- User Form Modal -->
+    <div id="userModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Nuevo Usuario</h3>
+                <span class="close" onclick="closeUserModal()">&times;</span>
+            </div>
+            <form id="userForm">
+                <input type="hidden" id="userId" value="">
+                
+                <div class="form-group">
+                    <label for="username">Nombre de Usuario *</label>
+                    <input type="text" id="username" name="username" required placeholder="Ingrese el nombre de usuario">
+                </div>
+                
+                <div class="form-group">
+                    <label for="fullName">Nombre Completo *</label>
+                    <input type="text" id="fullName" name="fullName" required placeholder="Ingrese el nombre completo">
+                </div>
+                
+                <div class="form-group">
+                    <label for="email">Correo Electrónico</label>
+                    <input type="email" id="email" name="email" placeholder="usuario@euforialiquors.com">
+                </div>
+                
+                <div class="form-group">
+                    <label for="phone">Teléfono</label>
+                    <input type="tel" id="phone" name="phone" placeholder="+57 300 123 4567">
+                </div>
+                
+                <div class="form-group">
+                    <label for="role">Rol *</label>
+                    <select id="role" name="role" required>
+                        <option value="">Seleccione un rol</option>
+                        <option value="super_admin">Super Administrador</option>
+                        <option value="admin">Administrador</option>
+                        <option value="manager">Gerente</option>
+                        <option value="employee">Empleado</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="password">Contraseña *</label>
+                    <input type="password" id="password" name="password" required placeholder="Ingrese la contraseña">
+                </div>
+                
+                <div class="form-group">
+                    <label for="confirmPassword">Confirmar Contraseña *</label>
+                    <input type="password" id="confirmPassword" name="confirmPassword" required placeholder="Confirme la contraseña">
+                </div>
+                
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeUserModal()">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">Guardar Usuario</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- App modal -->
+    <div id="appModal" class="app-modal">
+        <div class="box">
+            <div class="title" id="appModalTitle"></div>
+            <div class="message" id="appModalMessage"></div>
+            <div class="actions" id="appModalActions"></div>
         </div>
     </div>
 

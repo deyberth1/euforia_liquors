@@ -24,6 +24,9 @@ async function apiInvoke(channel, payload) {
         'get-dashboard-summary': async () => get('/dashboard/summary'),
         'get-tables': async () => get('/tables'),
         'get-tables-for-sale': async () => get('/tables/free'),
+        'create-table': async () => post('/tables', payload),
+        'update-table': async () => put(`/tables/${payload.id}`, payload),
+        'delete-table': async () => del(`/tables/${payload}`),
         'get-table-order': async () => get(`/tables/${payload}/order`),
         'get-products-for-sale': async () => get('/products?forSale=true'),
         'get-products': async () => get('/products'),
@@ -41,6 +44,13 @@ async function apiInvoke(channel, payload) {
         'add-schedule': async () => post('/schedules', payload),
         'add-income': async () => post('/transactions/income', payload),
         'add-expense': async () => post('/transactions/expense', payload),
+        'get-users': async () => get('/users'),
+        'add-user': async () => post('/users', payload),
+        'update-user': async () => put(`/users/${payload.id}`, payload),
+        'delete-user': async () => del(`/users/${payload}`),
+        'toggle-user-status': async () => put(`/users/${payload}/toggle-status`),
+        'check-username': async () => get(`/users/check-username${toQuery(payload)}`),
+        'reset-password': async () => post(`/users/${payload.id}/reset-password`, { new_password: payload.new_password }),
     };
     try {
         if (routes[channel]) {
@@ -117,6 +127,8 @@ loginForm.addEventListener('submit', async (e) => {
             try { loginContainer.remove(); } catch (e) { loginContainer.classList.add('hidden'); }
             appContainer.classList.remove('hidden');
             try { localStorage.setItem('sessionUser', JSON.stringify(currentUser)); } catch (_) {}
+            const label = document.getElementById('current-user-label');
+            if (label) { label.textContent = `Sesión: ${currentUser.username} (${getRoleDisplayName(currentUser.role)})`; }
             loadDashboardData();
         } else {
             showLoginError('Usuario o contraseña incorrectos');
@@ -161,6 +173,9 @@ function showModule(moduleName) {
     try { localStorage.setItem('lastModule', moduleName); } catch (_) {}
     
     // Load module-specific data
+    // Gate admin-only modules
+    const isSuper = currentUser && currentUser.role === 'super_admin';
+
     switch(moduleName) {
         case 'dashboard':
             loadDashboardData();
@@ -174,6 +189,7 @@ function showModule(moduleName) {
             break;
         case 'tables':
             loadTablesData();
+            ensureTablesAdminVisibility();
             break;
         case 'inventory':
             loadInventoryData();
@@ -183,6 +199,10 @@ function showModule(moduleName) {
             break;
         case 'schedules':
             loadSchedulesData();
+            break;
+        case 'users':
+            if (isSuper) { loadUsersData(); }
+            else { showNotification('Acceso restringido', 'error'); showModule('dashboard'); }
             break;
     }
 }
@@ -197,6 +217,16 @@ async function loadDashboardData() {
         // Load tables status
         const tablesData = await apiInvoke('get-tables');
         updateDashboardTables(tablesData);
+        // Show suggested cash close if any
+        try {
+            const dash = document.getElementById('dashboard-module');
+            const sum = await getCashSummary();
+            const lbl = dash?.querySelector('#dash-cash-status');
+            if (sum?.hasOpen && lbl) {
+                const sug = formatCurrency(Number(sum.suggestedClose||0));
+                lbl.title = `Cierre sugerido (efectivo): ${sug}`;
+            }
+        } catch (_) {}
         // Bind cash actions if present in dashboard
         const dashModule = document.getElementById('dashboard-module');
         if (dashModule) {
@@ -206,6 +236,9 @@ async function loadDashboardData() {
                 openBtn.addEventListener('click', async () => {
                     const amount = parseFloat(dashModule.querySelector('#dash-cash-open-amount').value);
                     if (isNaN(amount)) { alert('Monto inválido'); return; }
+                    // No permitir abrir si ya hay caja abierta
+                    const status = await apiInvoke('get-cash-sessions', { status: 'open' });
+                    if (Array.isArray(status) && status.length > 0) { showNotification('Ya hay una caja abierta', 'error'); return; }
                     const original = openBtn.textContent; openBtn.textContent = 'Abriendo...'; openBtn.disabled = true;
                     const res = await apiInvoke('cash-open', { opening_balance: Math.round(amount), user_id: currentUser?.id || 1 });
                     openBtn.textContent = original; openBtn.disabled = false;
@@ -218,6 +251,21 @@ async function loadDashboardData() {
                 closeBtn.addEventListener('click', async () => {
                     const amount = parseFloat(dashModule.querySelector('#dash-cash-close-amount').value);
                     if (isNaN(amount)) { alert('Monto inválido'); return; }
+                    // Obtener sugerido y advertir si difiere
+                    try {
+                        const cashSum = await getCashSummary();
+                        if (cashSum?.hasOpen) {
+                            const sug = Number(cashSum.suggestedClose || 0);
+                            if (Math.round(amount) !== Math.round(sug)) {
+                                let proceed = false;
+                                openAppModal({ title: 'Cerrar Caja', message: `Cierre sugerido (efectivo): ${formatCurrency(sug)}. ¿Desea cerrar con ${formatCurrency(Math.round(amount))}?`, confirmText: 'Cerrar', cancelText: 'Cancelar', onConfirm: () => { proceed = true; } });
+                                const wait = () => new Promise(r => setTimeout(r, 300));
+                                // Simple wait loop for modal confirmation
+                                for (let i=0;i<20 && !proceed;i++) await wait();
+                                if (!proceed) return;
+                            }
+                        }
+                    } catch (_) {}
                     const original = closeBtn.textContent; closeBtn.textContent = 'Cerrando...'; closeBtn.disabled = true;
                     const res = await apiInvoke('cash-close', { closing_balance: Math.round(amount), user_id: currentUser?.id || 1 });
                     closeBtn.textContent = original; closeBtn.disabled = false;
@@ -254,6 +302,14 @@ function updateDashboardTables(tablesData) {
             tablesContainer.appendChild(tableCard);
         });
     }
+}
+
+async function getCashSummary() {
+    try {
+        const res = await fetch(`${API_BASE}/cash/summary`, { cache: 'no-store' });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (_) { return null; }
 }
 
 // POS functionality
@@ -299,7 +355,7 @@ function createProductCard(product) {
     
     card.innerHTML = `
         <div class="product-name">${product.name}</div>
-        <div class="product-price">${formatCurrency(product.price)}</div>
+        <div class="product-price">${formatCurrency(Math.round(Number(product.price)||0))}</div>
         <div class="product-stock">Stock: ${product.stock}</div>
     `;
     
@@ -333,7 +389,7 @@ function renderTicket() {
         for (let i = 0; i < currentTicket.length; i++) {
             const item = currentTicket[i];
             fragment.appendChild(createTicketItem(item));
-            total += item.price * item.quantity;
+            total += (Math.round(Number(item.price)||0)) * item.quantity;
         }
         ticketItems.innerHTML = '';
         ticketItems.appendChild(fragment);
@@ -348,7 +404,7 @@ function createTicketItem(item) {
     itemElement.innerHTML = `
         <div class="item-info">
             <div class="item-name">${item.name}</div>
-            <div class="item-price">${formatCurrency(item.price)}</div>
+            <div class="item-price">${formatCurrency(Math.round(Number(item.price)||0))}</div>
         </div>
         <div class="item-quantity">
             <button class="quantity-btn" onclick="updateQuantity(${item.id}, -1)">-</button>
@@ -414,6 +470,7 @@ async function loadTablesData() {
     try {
         const tablesData = await apiInvoke('get-tables');
         renderTablesGrid(tablesData);
+        renderTablesAdmin(tablesData);
     } catch (error) {
         console.error('Error loading tables data:', error);
     }
@@ -447,6 +504,84 @@ function createTableCard(table) {
     `;
     
     return card;
+}
+function ensureTablesAdminVisibility() {
+    const adminCard = document.getElementById('tables-admin-card');
+    if (!adminCard) return;
+    if (currentUser && currentUser.role === 'super_admin') adminCard.classList.remove('hidden');
+    else adminCard.classList.add('hidden');
+}
+
+function renderTablesAdmin(tables) {
+    ensureTablesAdminVisibility();
+    const adminCard = document.getElementById('tables-admin-card');
+    if (!adminCard || adminCard.classList.contains('hidden')) return;
+    const tbody = document.getElementById('tbl-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    tables.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td style="padding:8px;">${t.name}</td>
+            <td style="padding:8px;">${t.type || 'table'}</td>
+            <td style="padding:8px; text-align:right;">${t.capacity || 4}</td>
+            <td style="padding:8px;">${t.status}</td>
+            <td style="padding:8px; display:flex; gap:8px; justify-content:center;">
+                <button type="button" class="btn btn-secondary" data-edit="${t.id}">Editar</button>
+                <button type="button" class="btn btn-secondary" data-del="${t.id}">Eliminar</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    let editingId = null;
+    const nameEl = document.getElementById('tbl-name');
+    const typeEl = document.getElementById('tbl-type');
+    const capEl = document.getElementById('tbl-cap');
+    const saveBtn = document.getElementById('tbl-save');
+    const cancelBtn = document.getElementById('tbl-cancel');
+
+    tbody.onclick = async (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        if (btn.dataset.edit) {
+            const id = parseInt(btn.dataset.edit);
+            const t = tables.find(x => x.id === id);
+            if (!t) return;
+            editingId = id;
+            nameEl.value = t.name; typeEl.value = t.type || 'table'; capEl.value = String(t.capacity || 4);
+            saveBtn.textContent = 'Actualizar'; cancelBtn.classList.remove('hidden');
+        } else if (btn.dataset.del) {
+            const id = parseInt(btn.dataset.del);
+            if (!confirm('¿Eliminar mesa?')) return;
+            const res = await apiInvoke('delete-table', id);
+            if (res.success !== false) { showNotification('Mesa eliminada', 'success'); loadTablesData(); }
+            else showNotification('Error al eliminar', 'error');
+        }
+    };
+
+    saveBtn.onclick = async () => {
+        const payload = { name: nameEl.value.trim(), type: typeEl.value, capacity: parseInt(capEl.value)||4 };
+        if (!payload.name) { alert('Nombre requerido'); return; }
+        if (editingId) {
+            payload.id = editingId; const res = await apiInvoke('update-table', payload); if (res.success === false) alert('Error al actualizar');
+        } else {
+            const res = await apiInvoke('create-table', payload); if (res.success === false) alert('Error al crear');
+        }
+        editingId = null; nameEl.value=''; capEl.value=''; typeEl.value='table'; saveBtn.textContent='Guardar'; cancelBtn.classList.add('hidden');
+        loadTablesData();
+    };
+
+    cancelBtn.onclick = () => { editingId = null; nameEl.value=''; capEl.value=''; typeEl.value='table'; saveBtn.textContent='Guardar'; cancelBtn.classList.add('hidden'); };
+}
+
+// Logout
+function logoutApp() {
+    try { localStorage.removeItem('sessionUser'); } catch (_) {}
+    currentUser = null;
+    appContainer.classList.add('hidden');
+    try { document.body.appendChild(loginContainer); } catch (_) {}
+    loginContainer.classList.remove('hidden');
 }
 
 async function selectTable(table) {
@@ -525,6 +660,7 @@ async function finalizeSale() {
         const saleData = {
             items: currentTicket,
             tableId: tableId,
+            payment_method: document.querySelector('#payment-method')?.value || 'cash',
             total: currentTicket.reduce((sum, item) => sum + (item.price * item.quantity), 0)
         };
         
@@ -533,6 +669,7 @@ async function finalizeSale() {
         
         if (result.success) {
             showNotification('Venta finalizada', 'success');
+            openAppModal({ title: 'Venta', message: 'Venta procesada correctamente.', confirmText: 'OK' });
             currentTicket = [];
             selectedTable = null;
             renderTicket();
@@ -564,7 +701,8 @@ async function saveOrder() {
         const tableId = selectedTable?.id ?? (selectionValue === 'direct' ? null : parseInt(selectionValue));
         const orderData = {
             items: currentTicket,
-            tableId: tableId
+            tableId: tableId,
+            payment_method: document.querySelector('#payment-method')?.value || 'cash'
         };
         
         if (btnSave) { btnSave.textContent = 'Guardando...'; btnSave.disabled = true; }
@@ -572,6 +710,7 @@ async function saveOrder() {
         
         if (result.success) {
             showNotification('Cuenta guardada', 'success');
+            openAppModal({ title: 'Cuenta', message: 'Cuenta guardada correctamente.', confirmText: 'OK' });
         } else {
             showNotification('Error al guardar la cuenta', 'error');
         }
@@ -613,6 +752,22 @@ function showNotification(message, type = 'info') {
     }, 3000);
 }
 
+// App modal (styled alert/confirm)
+function openAppModal({ title, message, confirmText = 'Aceptar', cancelText, onConfirm }) {
+    const modal = document.getElementById('appModal');
+    const t = document.getElementById('appModalTitle');
+    const m = document.getElementById('appModalMessage');
+    const a = document.getElementById('appModalActions');
+    if (!modal || !t || !m || !a) return;
+    t.textContent = title || '';
+    m.textContent = message || '';
+    a.innerHTML = '';
+    const ok = document.createElement('button'); ok.className = 'btn btn-primary'; ok.textContent = confirmText; ok.onclick = () => { modal.style.display = 'none'; try { onConfirm && onConfirm(); } catch(_) {} };
+    a.appendChild(ok);
+    if (cancelText) { const c = document.createElement('button'); c.className = 'btn btn-secondary'; c.textContent = cancelText; c.onclick = () => { modal.style.display = 'none'; }; a.appendChild(c); }
+    modal.style.display = 'flex';
+}
+
 function showActionNotification(message, actionLabel, onAction) {
     const notification = document.createElement('div');
     notification.style.cssText = `
@@ -651,6 +806,8 @@ try {
         currentUser = JSON.parse(stored);
         loginContainer.classList.add('hidden');
         appContainer.classList.remove('hidden');
+        const label = document.getElementById('current-user-label');
+        if (label) { label.textContent = `Sesión: ${currentUser.username} (${getRoleDisplayName(currentUser.role)})`; }
         const last = localStorage.getItem('lastModule') || 'dashboard';
         showModule(last);
     }
@@ -879,10 +1036,11 @@ function renderReportsUI() {
         </div>
         <div class="card">
             <div class="card-header"><h3>Filtros</h3></div>
-            <div class="input-group" style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px;">
+            <div class="input-group" style="display:grid; grid-template-columns: repeat(5, 1fr); gap:10px;">
                 <input type="date" id="rep-from" />
                 <input type="date" id="rep-to" />
                 <select id="rep-type"><option value="">Todos</option><option value="income">Ingresos</option><option value="expense">Gastos</option></select>
+                <select id="rep-payment"><option value="">Todos los pagos</option><option value="cash">Efectivo</option><option value="transfer">Transferencia</option></select>
                 <button type="button" class="btn btn-primary" id="rep-apply">Aplicar</button>
             </div>
             <div class="input-group" style="display:flex; gap:10px; margin-top:10px;">
@@ -955,7 +1113,7 @@ function renderReportsUI() {
         const amount = Math.round(parseFloat(module.querySelector('#tx-amount').value));
         if (!desc || isNaN(amount)) { alert('Complete descripción y monto'); return; }
         const btn = module.querySelector('#tx-add-income'); const orig = btn.textContent; btn.textContent = 'Guardando...'; btn.disabled = true;
-        const res = await apiInvoke('add-income', { description: desc, amount });
+        const res = await apiInvoke('add-income', { description: desc, amount, user_id: currentUser?.id || 1 });
         btn.textContent = orig; btn.disabled = false;
         if (res.success === false) { showNotification('Error al agregar ingreso', 'error'); return; }
         showNotification('Ingreso agregado', 'success');
@@ -967,7 +1125,7 @@ function renderReportsUI() {
         const amount = Math.round(parseFloat(module.querySelector('#tx-amount').value));
         if (!desc || isNaN(amount)) { alert('Complete descripción y monto'); return; }
         const btn = module.querySelector('#tx-add-expense'); const orig = btn.textContent; btn.textContent = 'Guardando...'; btn.disabled = true;
-        const res = await apiInvoke('add-expense', { description: desc, amount });
+        const res = await apiInvoke('add-expense', { description: desc, amount, user_id: currentUser?.id || 1 });
         btn.textContent = orig; btn.disabled = false;
         if (res.success === false) { showNotification('Error al agregar gasto', 'error'); return; }
         showNotification('Gasto agregado', 'success');
@@ -981,19 +1139,24 @@ async function refreshTransactions() {
     const from = module.querySelector('#rep-from').value;
     const to = module.querySelector('#rep-to').value;
     const type = module.querySelector('#rep-type').value;
+    const payment = module.querySelector('#rep-payment').value;
     const list = module.querySelector('#rep-list');
     list.textContent = 'Cargando...';
     try {
-        const rows = await apiInvoke('get-transactions-filtered', { from, to, type });
+        const rows = await apiInvoke('get-transactions-filtered', { from, to, type, payment });
         lastTransactions = rows;
-        list.innerHTML = rows.map(r => `<div style=\"display:flex; justify-content:space-between; padding:8px; border-bottom:1px solid rgba(255,255,255,0.1);\"><span>${r.created_at} - ${r.description || ''}</span><span>${r.type === 'expense' ? '-' : ''}${formatCurrency(r.amount)}</span></div>`).join('');
+        list.innerHTML = rows.map(r => `<div style=\"display:flex; justify-content:space-between; padding:8px; border-bottom:1px solid rgba(255,255,255,0.1);\"><span>${r.created_at} - ${r.description || ''} ${r.payment_method ? '('+r.payment_method+')' : ''} — ${r.created_by_username || ''}</span><span>${r.type === 'expense' ? '-' : ''}${formatCurrency(r.amount)}</span></div>`).join('');
         const income = rows.filter(r => r.type === 'income').reduce((s, r) => s + Number(r.amount || 0), 0);
         const expense = rows.filter(r => r.type === 'expense').reduce((s, r) => s + Number(r.amount || 0), 0);
         const balance = income - expense;
         const summary = module.querySelector('#rep-summary');
         if (summary) {
+            const incomeCash = rows.filter(r => r.type === 'income' && r.payment_method === 'cash').reduce((s, r) => s + Number(r.amount || 0), 0);
+            const incomeTransfer = rows.filter(r => r.type === 'income' && r.payment_method === 'transfer').reduce((s, r) => s + Number(r.amount || 0), 0);
             summary.innerHTML = `
                 <div>Ingresos: <strong style="color:#27ae60;">${formatCurrency(income)}</strong></div>
+                <div>Efectivo: <strong style="color:#27ae60;">${formatCurrency(incomeCash)}</strong></div>
+                <div>Transferencias: <strong style="color:#27ae60;">${formatCurrency(incomeTransfer)}</strong></div>
                 <div>Gastos: <strong style="color:#e74c3c;">${formatCurrency(expense)}</strong></div>
                 <div>Balance: <strong style="color:${balance>=0?'#27ae60':'#e74c3c'};">${formatCurrency(balance)}</strong></div>
             `;
@@ -1005,12 +1168,14 @@ async function refreshTransactions() {
 
 function exportTransactionsToCSV() {
     const rows = lastTransactions || [];
-    const header = ['Fecha', 'Tipo', 'Descripción', 'Monto'];
+    const header = ['Fecha', 'Tipo', 'Descripción', 'Monto', 'Método de pago', 'Usuario'];
     const csvRows = [header.join(',')].concat(rows.map(r => [
         (r.created_at || '').replace(/,/g, ' '),
         r.type || '',
         (r.description || '').replace(/,/g, ' '),
-        String(r.amount || 0)
+        String(r.amount || 0),
+        r.payment_method || '',
+        String(r.created_by || '')
     ].join(',')));
     const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -1141,3 +1306,288 @@ async function addSchedule() {
     if (res.success === false) alert('Error al agregar turno');
     await refreshSchedules();
 }
+
+// Users module
+async function loadUsersData() {
+    try {
+        const users = await apiInvoke('get-users');
+        renderUsersGrid(users);
+    } catch (error) {
+        console.error('Error loading users data:', error);
+        showNotification('Error al cargar usuarios', 'error');
+    }
+}
+
+function renderUsersGrid(users) {
+    const usersList = document.getElementById('users-list');
+    if (!usersList) return;
+    
+    usersList.innerHTML = '';
+    
+    if (users.length === 0) {
+        usersList.innerHTML = '<p style="color: #b0b0b0; text-align: center; padding: 20px;">No hay usuarios registrados</p>';
+        return;
+    }
+    
+    const usersGrid = document.createElement('div');
+    usersGrid.className = 'users-grid';
+    
+    users.forEach(user => {
+        const userCard = createUserCard(user);
+        usersGrid.appendChild(userCard);
+    });
+    
+    usersList.appendChild(usersGrid);
+}
+
+function createUserCard(user) {
+    const card = document.createElement('div');
+    card.className = 'user-card';
+    
+    const roleClass = `role-${user.role}`;
+    const statusText = user.is_active ? 'Activo' : 'Inactivo';
+    const statusColor = user.is_active ? '#27ae60' : '#e74c3c';
+    
+    card.innerHTML = `
+        <div class="user-header">
+            <div class="user-name">${user.full_name || user.username}</div>
+            <div class="user-role ${roleClass}">${getRoleDisplayName(user.role)}</div>
+        </div>
+        <div class="user-info">
+            <div class="user-info-item">
+                <span class="user-info-label">Usuario:</span>
+                <span class="user-info-value">${user.username}</span>
+            </div>
+            <div class="user-info-item">
+                <span class="user-info-label">Email:</span>
+                <span class="user-info-value">${user.email || 'No especificado'}</span>
+            </div>
+            <div class="user-info-item">
+                <span class="user-info-label">Teléfono:</span>
+                <span class="user-info-value">${user.phone || 'No especificado'}</span>
+            </div>
+            <div class="user-info-item">
+                <span class="user-info-label">Estado:</span>
+                <span class="user-info-value" style="color: ${statusColor};">${statusText}</span>
+            </div>
+            <div class="user-info-item">
+                <span class="user-info-label">Creado:</span>
+                <span class="user-info-value">${formatDate(user.created_at)}</span>
+            </div>
+        </div>
+        <div class="user-actions">
+            <button class="btn btn-small btn-edit" onclick="editUser(${user.id})">Editar</button>
+            <button class="btn btn-small btn-toggle" onclick="toggleUserStatus(${user.id})">
+                ${user.is_active ? 'Desactivar' : 'Activar'}
+            </button>
+            ${currentUser && currentUser.role === 'super_admin' ? `<button class="btn btn-small btn-secondary" onclick=\"resetUserPassword(${user.id})\">Restablecer</button>` : ''}
+            ${user.role !== 'super_admin' ? `<button class="btn btn-small btn-delete" onclick="deleteUser(${user.id})">Eliminar</button>` : ''}
+        </div>
+    `;
+    
+    return card;
+}
+
+function getRoleDisplayName(role) {
+    const roleNames = {
+        'super_admin': 'Super Admin',
+        'admin': 'Administrador',
+        'manager': 'Gerente',
+        'employee': 'Empleado'
+    };
+    return roleNames[role] || role;
+}
+
+function formatDate(dateString) {
+    if (!dateString) return 'No especificado';
+    const date = new Date(dateString);
+    return date.toLocaleDateString('es-CO');
+}
+
+// User form functions
+function showUserForm(userId = null) {
+    const modal = document.getElementById('userModal');
+    const modalTitle = document.getElementById('modalTitle');
+    const form = document.getElementById('userForm');
+    
+    if (userId) {
+        modalTitle.textContent = 'Editar Usuario';
+        loadUserForEdit(userId);
+    } else {
+        modalTitle.textContent = 'Nuevo Usuario';
+        form.reset();
+        document.getElementById('userId').value = '';
+    }
+    
+    modal.style.display = 'block';
+
+    // Bind username availability check
+    const usernameEl = document.getElementById('username');
+    if (usernameEl && !usernameEl._bound) {
+        let t = null;
+        usernameEl.addEventListener('input', async () => {
+            clearTimeout(t);
+            t = setTimeout(async () => {
+                const uname = String(usernameEl.value||'').trim().toLowerCase();
+                const excludeId = document.getElementById('userId').value || '';
+                if (!uname) { usernameEl.style.outline = ''; return; }
+                try {
+                    const res = await apiInvoke('check-username', { username: uname, excludeId });
+                    usernameEl.style.outline = res.available ? '2px solid #27ae60' : '2px solid #e74c3c';
+                } catch (_) { usernameEl.style.outline = ''; }
+            }, 250);
+        });
+        usernameEl._bound = true;
+    }
+}
+
+function closeUserModal() {
+    const modal = document.getElementById('userModal');
+    modal.style.display = 'none';
+    document.getElementById('userForm').reset();
+}
+
+async function loadUserForEdit(userId) {
+    try {
+        const users = await apiInvoke('get-users');
+        const user = users.find(u => u.id === userId);
+        
+        if (user) {
+            document.getElementById('userId').value = user.id;
+            document.getElementById('username').value = user.username;
+            document.getElementById('fullName').value = user.full_name || '';
+            document.getElementById('email').value = user.email || '';
+            document.getElementById('phone').value = user.phone || '';
+            document.getElementById('role').value = user.role;
+            document.getElementById('password').required = false;
+            document.getElementById('confirmPassword').required = false;
+        }
+    } catch (error) {
+        console.error('Error loading user for edit:', error);
+        showNotification('Error al cargar datos del usuario', 'error');
+    }
+}
+
+async function editUser(userId) {
+    showUserForm(userId);
+}
+
+async function toggleUserStatus(userId) {
+    try {
+        const result = await apiInvoke('toggle-user-status', userId);
+        if (result.success) {
+            showNotification('Estado del usuario actualizado', 'success');
+            loadUsersData();
+        } else {
+            showNotification('Error al actualizar estado', 'error');
+        }
+    } catch (error) {
+        console.error('Error toggling user status:', error);
+        showNotification('Error al actualizar estado', 'error');
+    }
+}
+
+async function deleteUser(userId) {
+    if (!confirm('¿Está seguro de que desea eliminar este usuario?')) {
+        return;
+    }
+    
+    try {
+        const result = await apiInvoke('delete-user', userId);
+        if (result.success) {
+            showNotification('Usuario eliminado', 'success');
+            loadUsersData();
+        } else {
+            showNotification('Error al eliminar usuario', 'error');
+        }
+    } catch (error) {
+        console.error('Error deleting user:', error);
+        showNotification('Error al eliminar usuario', 'error');
+    }
+}
+
+async function resetUserPassword(userId) {
+    if (!currentUser || currentUser.role !== 'super_admin') { showNotification('Acceso restringido', 'error'); return; }
+    const newPwd = prompt('Nueva contraseña (mínimo 4 caracteres):');
+    if (!newPwd || newPwd.length < 4) { showNotification('Contraseña inválida', 'error'); return; }
+    try {
+        const res = await apiInvoke('reset-password', { id: userId, new_password: newPwd });
+        if (res.success) { showNotification('Contraseña actualizada', 'success'); }
+        else { showNotification(res.error || 'Error al actualizar', 'error'); }
+    } catch (e) {
+        showNotification('Error al actualizar', 'error');
+    }
+}
+
+// User form submission
+document.addEventListener('DOMContentLoaded', function() {
+    const userForm = document.getElementById('userForm');
+    if (userForm) {
+        userForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(userForm);
+            const userId = document.getElementById('userId').value;
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirmPassword').value;
+            
+            // Validate passwords match
+            if (password && password !== confirmPassword) {
+                showNotification('Las contraseñas no coinciden', 'error');
+                return;
+            }
+            
+            const userData = {
+                username: String(formData.get('username')||'').trim().toLowerCase(),
+                full_name: formData.get('fullName'),
+                email: formData.get('email'),
+                phone: formData.get('phone'),
+                role: formData.get('role')
+            };
+            
+            // Only include password if provided
+            if (password) {
+                userData.password = password;
+            }
+            
+            try {
+                let result;
+                if (userId) {
+                    userData.id = parseInt(userId);
+                    result = await apiInvoke('update-user', userData);
+                } else {
+                    result = await apiInvoke('add-user', userData);
+                }
+                
+                if (result.success) {
+                    showNotification(userId ? 'Usuario actualizado' : 'Usuario creado', 'success');
+                    closeUserModal();
+                    loadUsersData();
+                } else {
+                    showNotification(result.error || 'Error al guardar usuario', 'error');
+                }
+            } catch (error) {
+                console.error('Error saving user:', error);
+                showNotification('Error al guardar usuario', 'error');
+            }
+        });
+    }
+    
+    // Close modal when clicking outside
+    const modal = document.getElementById('userModal');
+    if (modal) {
+        window.addEventListener('click', function(e) {
+            if (e.target === modal) {
+                closeUserModal();
+            }
+        });
+    }
+});
+
+// Export functions for global access
+window.showUserForm = showUserForm;
+window.closeUserModal = closeUserModal;
+window.editUser = editUser;
+window.toggleUserStatus = toggleUserStatus;
+window.deleteUser = deleteUser;
+window.resetUserPassword = resetUserPassword;
