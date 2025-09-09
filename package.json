@@ -1,0 +1,22 @@
+{
+  "name": "euforia-liquors-pos",
+  "version": "1.0.0",
+  "description": "Sistema POS para Euforia Liquors",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "api": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^28.2.0"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "express": "^4.18.2",
+    "compression": "^1.7.4"
+  }
+}
