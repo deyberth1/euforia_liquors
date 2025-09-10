@@ -109,7 +109,15 @@ app.get('/api/tables', (req, res) => {
       FROM sales s JOIN sale_items si ON s.id = si.sale_id
       WHERE s.status = 'pending' GROUP BY s.table_id
     ) si ON t.id = si.table_id
-    ORDER BY t.name`;
+    ORDER BY
+      CASE
+        WHEN t.name LIKE 'Mesa %' THEN 0
+        WHEN t.name LIKE 'Barra %' THEN 1
+        ELSE 2
+      END,
+      CASE WHEN t.name LIKE 'Mesa %' THEN CAST(SUBSTR(t.name, 6) AS INTEGER) END,
+      CASE WHEN t.name LIKE 'Barra %' THEN CAST(SUBSTR(t.name, 7) AS INTEGER) END,
+      t.name`;
   db.all(sql, [], (err, rows) => {
     if (err) return res.status(500).json([]);
     res.json(rows);

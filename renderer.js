@@ -284,11 +284,9 @@ async function loadDashboardData() {
 function updateDashboardSummary(data) {
     const salesEl = document.getElementById('dash-sales-today');
     const tablesEl = document.getElementById('dash-active-tables');
-    const lowStockEl = document.getElementById('dash-low-stock');
     const transEl = document.getElementById('dash-total-trans');
     if (salesEl) salesEl.textContent = formatCurrency(data.totalSales || 0);
     if (tablesEl) tablesEl.textContent = String(data.activeTables || 0);
-    if (lowStockEl) lowStockEl.textContent = String(data.lowStockProducts || 0);
     if (transEl) transEl.textContent = String(data.totalTransactions || 0);
 }
 
@@ -318,6 +316,7 @@ async function loadPOSData() {
         // Load products for sale
         const productsData = await apiInvoke('get-products-for-sale');
         renderProductsGrid(productsData);
+        bindPosProductFilters(productsData);
         
         // Load available tables
         const tablesData = await apiInvoke('get-tables-for-sale');
@@ -345,6 +344,29 @@ function renderProductsGrid(products) {
         }
         productsGrid.innerHTML = '';
         productsGrid.appendChild(fragment);
+    }
+}
+
+function bindPosProductFilters(products) {
+    const allCats = Array.from(new Set((products||[]).map(p => (p.category||'').trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+    const catSel = document.getElementById('pos-category-filter');
+    const searchEl = document.getElementById('pos-search');
+    if (catSel) {
+        catSel.innerHTML = `<option value="">Todas las categorías</option>${allCats.map(c=>`<option value="${c}">${c}</option>`).join('')}`;
+    }
+    const apply = () => {
+        const q = (searchEl?.value || '').toLowerCase().trim();
+        const c = (catSel?.value || '').toLowerCase().trim();
+        let list = products.slice();
+        if (c) list = list.filter(p => (p.category||'').toLowerCase() === c);
+        if (q) list = list.filter(p => (p.name||'').toLowerCase().includes(q) || (p.category||'').toLowerCase().includes(q));
+        renderProductsGrid(list);
+    };
+    if (searchEl && !searchEl._bound) {
+        let t=null; searchEl.addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(apply,150); }); searchEl._bound=true;
+    }
+    if (catSel && !catSel._bound) {
+        catSel.addEventListener('change', apply); catSel._bound=true;
     }
 }
 
@@ -480,7 +502,21 @@ function renderTablesGrid(tables) {
     const tablesContainer = document.querySelector('#tables-module .tables-container');
     if (tablesContainer) {
         tablesContainer.innerHTML = '';
-        tables.forEach(table => {
+        const sorted = tables.slice().sort((a,b)=>{
+            const orderKey = (t) => {
+                const name = String(t.name||'');
+                const mesa = name.match(/^Mesa\s+(\d+)/i);
+                const barra = name.match(/^Barra\s+(\d+)/i);
+                if (mesa) return { group: 0, num: parseInt(mesa[1],10) || 0, name };
+                if (barra) return { group: 1, num: parseInt(barra[1],10) || 0, name };
+                return { group: 2, num: Number.MAX_SAFE_INTEGER, name };
+            };
+            const ka = orderKey(a), kb = orderKey(b);
+            if (ka.group !== kb.group) return ka.group - kb.group;
+            if (ka.num !== kb.num) return ka.num - kb.num;
+            return ka.name.localeCompare(kb.name);
+        });
+        sorted.forEach(table => {
             const tableCard = createTableCard(table);
             tableCard.onclick = () => selectTable(table);
             tablesContainer.appendChild(tableCard);
@@ -862,6 +898,32 @@ function updateCurrentTableLabel() {
 }
 
 // Inventory module
+function getExtraCategories() {
+    try {
+        const raw = localStorage.getItem('invExtraCategories');
+        const arr = JSON.parse(raw || '[]');
+        return Array.isArray(arr) ? arr.filter(Boolean) : [];
+    } catch (_) { return []; }
+}
+function setExtraCategories(categories) {
+    try { localStorage.setItem('invExtraCategories', JSON.stringify(Array.from(new Set(categories.filter(Boolean))))); } catch (_) {}
+}
+
+function updateInventoryControlsFromCategories(allCategories) {
+    const categories = Array.from(new Set((allCategories || []).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+    const catSelect = document.getElementById('inv-category-select');
+    const filterSel = document.getElementById('inv-filter');
+    if (catSelect) {
+        const current = catSelect.value;
+        catSelect.innerHTML = `<option value="">Seleccione categoría</option>${categories.map(c=>`<option value="${c}">${c}</option>`).join('')}<option value="__new__">Nueva categoría…</option>`;
+        if (Array.from(catSelect.options).some(o => o.value === current)) catSelect.value = current;
+    }
+    if (filterSel) {
+        const current = filterSel.value;
+        filterSel.innerHTML = `<option value="">Todas las categorías</option>${categories.map(c=>`<option value="${c}">${c}</option>`).join('')}`;
+        if (Array.from(filterSel.options).some(o => o.value === current)) filterSel.value = current; else filterSel.value = '';
+    }
+}
 async function loadInventoryData() {
     try {
         const products = await apiInvoke('get-products');
@@ -874,6 +936,8 @@ async function loadInventoryData() {
 function renderInventory(products) {
     const module = document.getElementById('inventory-module');
     if (!module) return;
+    const categoriesFromProducts = Array.from(new Set((products || []).map(p => (p.category || '').trim()).filter(Boolean)));
+    const categories = Array.from(new Set([...categoriesFromProducts, ...getExtraCategories()])).sort((a,b)=>a.localeCompare(b));
     module.innerHTML = `
         <div class="page-header">
             <div class="brand-logo">
@@ -884,11 +948,18 @@ function renderInventory(products) {
         </div>
         <div class="card">
             <div class="card-header"><h3>Gestión de Productos</h3></div>
-            <div class="input-group" style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px;">
+            <div class="input-group" style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; align-items:center;">
                 <input id="inv-name" placeholder="Nombre" />
                 <input id="inv-price" type="number" step="1" placeholder="Precio (COP)" />
                 <input id="inv-stock" type="number" placeholder="Stock" />
-                <input id="inv-category" placeholder="Categoría" />
+                <div style="display:grid; grid-template-columns: 1fr; gap:8px;">
+                    <select id="inv-category-select">
+                        <option value="">Seleccione categoría</option>
+                        ${categories.map(c=>`<option value="${c}">${c}</option>`).join('')}
+                        <option value="__new__">Nueva categoría…</option>
+                    </select>
+                    <input id="inv-category-new" placeholder="Nueva categoría" class="hidden" />
+                </div>
             </div>
             <div class="action-buttons" style="flex-direction:row; gap:10px;">
                 <button type="button" class="btn btn-primary" id="inv-add">Guardar</button>
@@ -896,9 +967,13 @@ function renderInventory(products) {
             </div>
         </div>
         <div class="card">
-            <div class="card-header"><h3>Buscar</h3></div>
-            <div class="input-group" style="display:grid; grid-template-columns: 1fr; gap:10px;">
+            <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; gap:10px;"><h3>Filtros</h3><button type="button" class="btn btn-secondary" id="inv-manage-cats">Gestionar Categorías</button></div>
+            <div class="input-group" style="display:grid; grid-template-columns: 1fr 220px; gap:10px; align-items:center;">
                 <input id="inv-search" placeholder="Buscar por nombre o categoría" />
+                <select id="inv-filter">
+                    <option value="">Todas las categorías</option>
+                    ${categories.map(c=>`<option value="${c}">${c}</option>`).join('')}
+                </select>
             </div>
         </div>
         <div class="card">
@@ -938,7 +1013,8 @@ function renderInventory(products) {
     const nameEl = module.querySelector('#inv-name');
     const priceEl = module.querySelector('#inv-price');
     const stockEl = module.querySelector('#inv-stock');
-    const catEl = module.querySelector('#inv-category');
+    const catSelect = module.querySelector('#inv-category-select');
+    const catNew = module.querySelector('#inv-category-new');
     const addBtn = module.querySelector('#inv-add');
     const cancelBtn = module.querySelector('#inv-cancel');
 
@@ -950,7 +1026,16 @@ function renderInventory(products) {
             const prod = products.find(x => x.id === id);
             if (!prod) return;
             editingId = id;
-            nameEl.value = prod.name; priceEl.value = String(Math.round(Number(prod.price) || 0)); stockEl.value = String(prod.stock); catEl.value = prod.category || '';
+            nameEl.value = prod.name; priceEl.value = String(Math.round(Number(prod.price) || 0)); stockEl.value = String(prod.stock);
+            if (prod.category && Array.from(catSelect.options).some(o => o.value === prod.category)) {
+                catSelect.value = prod.category;
+                catNew.classList.add('hidden');
+                catNew.value = '';
+            } else {
+                catSelect.value = '__new__';
+                catNew.classList.remove('hidden');
+                catNew.value = prod.category || '';
+            }
             addBtn.textContent = 'Actualizar';
             cancelBtn.classList.remove('hidden');
         } else if (btn.dataset.del) {
@@ -982,9 +1067,17 @@ function renderInventory(products) {
             name: nameEl.value.trim(),
             price: (() => { const v = String(priceEl.value||'').replace(/[^0-9]/g,''); return v? parseInt(v,10): NaN; })(),
             stock: (() => { const v = String(stockEl.value||'').replace(/[^0-9]/g,''); return v? parseInt(v,10): NaN; })(),
-            category: catEl.value.trim()
+            category: (() => { const sel = catSelect.value; return sel === '__new__' ? String(catNew.value||'').trim() : String(sel||'').trim(); })()
         };
         if (!payload.name || isNaN(payload.price) || isNaN(payload.stock)) { alert('Complete nombre, precio y stock'); return; }
+        if (!payload.category && catSelect.value === '__new__') { alert('Ingrese el nombre de la nueva categoría'); return; }
+        if (catSelect.value === '__new__' && payload.category) {
+            const extras = getExtraCategories();
+            if (!extras.includes(payload.category)) {
+                extras.push(payload.category);
+                setExtraCategories(extras);
+            }
+        }
         if (editingId) {
             payload.id = editingId;
             const res = await apiInvoke('update-product', payload);
@@ -993,28 +1086,160 @@ function renderInventory(products) {
             const res = await apiInvoke('add-product', payload);
             if (res.success === false) alert('Error al agregar');
         }
-        editingId = null; nameEl.value = ''; priceEl.value = ''; stockEl.value=''; catEl.value='';
+        editingId = null; nameEl.value = ''; priceEl.value = ''; stockEl.value=''; catSelect.value=''; catNew.value=''; catNew.classList.add('hidden');
         addBtn.textContent = 'Guardar'; cancelBtn.classList.add('hidden');
         loadInventoryData();
     });
     cancelBtn.addEventListener('click', () => {
-        editingId = null; nameEl.value = ''; priceEl.value = ''; stockEl.value=''; catEl.value='';
+        editingId = null; nameEl.value = ''; priceEl.value = ''; stockEl.value=''; catSelect.value=''; catNew.value=''; catNew.classList.add('hidden');
         addBtn.textContent = 'Guardar'; cancelBtn.classList.add('hidden');
     });
 
     const searchEl = module.querySelector('#inv-search');
-    if (searchEl) {
-        let t = null;
-        searchEl.addEventListener('input', () => {
-            clearTimeout(t);
-            t = setTimeout(() => {
-                const q = searchEl.value.trim().toLowerCase();
-                if (!q) { renderInvRows(products); return; }
-                const filtered = products.filter(p => (p.name || '').toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q));
-                renderInvRows(filtered);
-            }, 150);
+    const filterEl = module.querySelector('#inv-filter');
+    function applyInvFilters() {
+        const q = (searchEl?.value || '').trim().toLowerCase();
+        const cat = (filterEl?.value || '').trim().toLowerCase();
+        let list = products.slice();
+        if (cat) list = list.filter(p => (p.category || '').toLowerCase() === cat);
+        if (q) list = list.filter(p => (p.name || '').toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q));
+        renderInvRows(list);
+    }
+    if (searchEl) { let t=null; searchEl.addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(applyInvFilters,150); }); }
+    if (filterEl) { filterEl.addEventListener('change', applyInvFilters); }
+    // Initialize filter dropdown options if categories update later
+    updateInventoryControlsFromCategories(categories);
+
+    if (catSelect) {
+        catSelect.addEventListener('change', () => {
+            if (catSelect.value === '__new__') { catNew.classList.remove('hidden'); catNew.focus(); }
+            else { catNew.classList.add('hidden'); catNew.value=''; }
         });
     }
+
+    // Category manager modal
+    const manageBtn = module.querySelector('#inv-manage-cats');
+    if (manageBtn && !manageBtn._bound) {
+        manageBtn.addEventListener('click', () => openCategoryManager(products));
+        manageBtn._bound = true;
+    }
+}
+
+async function openCategoryManager(products) {
+    const categoriesFromProducts = Array.from(new Set((products || []).map(p => (p.category || '').trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+    const extra = getExtraCategories();
+    const allCats = Array.from(new Set([...categoriesFromProducts, ...extra]));
+    let overlay = document.getElementById('catManagerModal');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'catManagerModal';
+        overlay.className = 'app-modal';
+        overlay.innerHTML = `
+            <div class="box" style="max-width:520px; width:90%;">
+                <div class="title">Gestionar Categorías</div>
+                <div class="message">
+                    <div style="display:grid; gap:10px;">
+                        <div>
+                            <div style="color:#b0b0b0; margin-bottom:6px;">Categorías existentes</div>
+                            <div id="cat-list" style="max-height:200px; overflow:auto; border:1px solid rgba(212,175,55,0.2); border-radius:8px; padding:8px;"></div>
+                        </div>
+                        <div style="display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center;">
+                            <input id="cat-new" placeholder="Nueva categoría" />
+                            <button class="btn btn-secondary" id="cat-add">Agregar</button>
+                        </div>
+                        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                            <div>
+                                <label style="color:#b0b0b0;">Renombrar</label>
+                                <select id="cat-rename-from"></select>
+                                <input id="cat-rename-to" placeholder="Nuevo nombre" style="margin-top:6px;" />
+                                <button class="btn btn-secondary" id="cat-rename" style="margin-top:8px; width:100%;">Aplicar</button>
+                            </div>
+                            <div>
+                                <label style="color:#b0b0b0;">Eliminar</label>
+                                <select id="cat-delete"></select>
+                                <label style="color:#b0b0b0; margin-top:6px; display:block;">Mover productos a</label>
+                                <select id="cat-move-to"></select>
+                                <button class="btn btn-secondary" id="cat-delete-btn" style="margin-top:8px; width:100%;">Eliminar</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="actions">
+                    <button class="btn btn-secondary" id="cat-close">Cerrar</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', (e)=>{ if (e.target === overlay) overlay.style.display='none'; });
+    }
+    const populateSelects = () => {
+        const all = Array.from(new Set([...categoriesFromProducts, ...getExtraCategories()]));
+        overlay.querySelector('#cat-rename-from').innerHTML = all.map(c=>`<option value="${c}">${c}</option>`).join('');
+        overlay.querySelector('#cat-delete').innerHTML = all.map(c=>`<option value="${c}">${c}</option>`).join('');
+        const moveOptions = ['general',''].concat(all).filter((c,i,arr)=>arr.indexOf(c)===i).map(c=>`<option value="${c}">${c || 'Sin categoría'}</option>`).join('');
+        overlay.querySelector('#cat-move-to').innerHTML = moveOptions;
+    };
+    const renderList = () => {
+        const counts = Object.create(null);
+        products.forEach(p => { const c=(p.category||''); counts[c] = (counts[c]||0)+1; });
+        const list = overlay.querySelector('#cat-list');
+        const all = Array.from(new Set([...categoriesFromProducts, ...getExtraCategories()]));
+        list.innerHTML = all.map(c=>`<div style="display:flex; justify-content:space-between; padding:6px 8px; border-bottom:1px solid rgba(255,255,255,0.06);"><span>${c || 'Sin categoría'}</span><span style="color:#b0b0b0;">${counts[c]||0}</span></div>`).join('');
+    };
+    populateSelects();
+    renderList();
+    overlay.style.display = 'flex';
+    overlay.querySelector('#cat-close').onclick = () => overlay.style.display='none';
+
+    overlay.querySelector('#cat-add').onclick = () => {
+        const val = String(overlay.querySelector('#cat-new').value||'').trim();
+        if (!val) return;
+        // avoid duplicates case-insensitively
+        const lower = val.toLowerCase();
+        const updated = Array.from(new Set([...getExtraCategories().filter(c=>c.toLowerCase()!==lower), val]));
+        setExtraCategories(updated);
+        overlay.querySelector('#cat-new').value = '';
+        populateSelects(); renderList();
+        updateInventoryControlsFromCategories([...categoriesFromProducts, ...updated]);
+        showNotification('Categoría agregada', 'success');
+    };
+
+    overlay.querySelector('#cat-rename').onclick = async () => {
+        const from = String(overlay.querySelector('#cat-rename-from').value||'').trim();
+        const to = String(overlay.querySelector('#cat-rename-to').value||'').trim();
+        if (!from || !to || from === to) { showNotification('Datos inválidos', 'error'); return; }
+        const affected = products.filter(p => (p.category||'') === from);
+        for (const prod of affected) {
+            const payload = { id: prod.id, name: prod.name, price: Math.round(Number(prod.price)||0), stock: parseInt(prod.stock)||0, category: to };
+            const res = await apiInvoke('update-product', payload);
+            if (res?.success === false) { showNotification('Error en renombrar categoría', 'error'); return; }
+        }
+        const extras = getExtraCategories().filter(c => c !== from);
+        if (!categoriesFromProducts.includes(to)) extras.push(to);
+        setExtraCategories(extras);
+        showNotification('Categoría renombrada', 'success');
+        updateInventoryControlsFromCategories([...categoriesFromProducts.filter(c=>c!==from), to, ...getExtraCategories()]);
+        overlay.style.display='none';
+        loadInventoryData();
+    };
+
+    overlay.querySelector('#cat-delete-btn').onclick = async () => {
+        const del = String(overlay.querySelector('#cat-delete').value||'').trim();
+        const moveTo = String(overlay.querySelector('#cat-move-to').value||'');
+        if (!del) return;
+        if (!confirm(`Eliminar categoría "${del}" y mover productos a "${moveTo || 'Sin categoría'}"?`)) return;
+        const affected = products.filter(p => (p.category||'') === del);
+        for (const prod of affected) {
+            const payload = { id: prod.id, name: prod.name, price: Math.round(Number(prod.price)||0), stock: parseInt(prod.stock)||0, category: moveTo };
+            const res = await apiInvoke('update-product', payload);
+            if (res?.success === false) { showNotification('Error eliminando categoría', 'error'); return; }
+        }
+        const extras = getExtraCategories().filter(c => c !== del);
+        setExtraCategories(extras);
+        showNotification('Categoría eliminada', 'success');
+        updateInventoryControlsFromCategories([...categoriesFromProducts.filter(c=>c!==del), ...extras]);
+        overlay.style.display='none';
+        loadInventoryData();
+    };
 }
 
 // Reports module
