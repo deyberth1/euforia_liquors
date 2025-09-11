@@ -301,6 +301,112 @@ app.get('/api/transactions', (req, res) => {
   });
 });
 
+// Update/Delete transactions (super admin only, pass user_role='super_admin')
+app.put('/api/transactions/:id', (req, res) => {
+  const { id } = req.params;
+  const { amount, description, payment_method, type, user_role } = req.body;
+  if (user_role !== 'super_admin') return res.status(403).json({ success:false, error:'Forbidden' });
+  const fields = [];
+  const params = [];
+  if (typeof amount !== 'undefined') { fields.push('amount = ?'); params.push(Math.round(Number(amount)||0)); }
+  if (typeof description !== 'undefined') { fields.push('description = ?'); params.push(description); }
+  if (typeof payment_method !== 'undefined') { fields.push('payment_method = ?'); params.push(payment_method); }
+  if (typeof type !== 'undefined') { fields.push('type = ?'); params.push(type); }
+  if (fields.length === 0) return res.json({ success:true, changes:0 });
+  const sql = `UPDATE transactions SET ${fields.join(', ')}, created_at = created_at WHERE id = ?`;
+  params.push(id);
+  db.run(sql, params, function(err){
+    if (err) return res.status(500).json({ success:false, error: err.message });
+    res.json({ success:true, changes: this.changes });
+  });
+});
+
+app.delete('/api/transactions/:id', (req, res) => {
+  const { id } = req.params;
+  const user_role = req.query.user_role || req.body?.user_role;
+  if (user_role !== 'super_admin') return res.status(403).json({ success:false, error:'Forbidden' });
+  db.run('DELETE FROM transactions WHERE id = ?', [id], function(err){
+    if (err) return res.status(500).json({ success:false, error: err.message });
+    res.json({ success:true, changes: this.changes });
+  });
+});
+
+// Credits API (accounts receivable/payable)
+app.get('/api/credits', (req, res) => {
+  const { type, status } = req.query;
+  let sql = 'SELECT c.*, (c.total - COALESCE(p.paid,0)) as balance, COALESCE(p.paid,0) as paid_amount FROM credits c LEFT JOIN (SELECT credit_id, SUM(amount) as paid FROM credit_payments GROUP BY credit_id) p ON c.id = p.credit_id WHERE 1=1';
+  const params = [];
+  if (type) { sql += ' AND c.type = ?'; params.push(type); }
+  if (status) { sql += ' AND c.status = ?'; params.push(status); }
+  sql += ' ORDER BY c.created_at DESC';
+  db.all(sql, params, (err, rows) => {
+    if (err) return res.status(500).json([]);
+    res.json(rows);
+  });
+});
+
+app.post('/api/credits', (req, res) => {
+  const { type, description, party, total, due_date } = req.body;
+  if (!type || !total) return res.status(400).json({ success:false, error:'type and total are required' });
+  const sql = 'INSERT INTO credits (type, description, party, total, due_date) VALUES (?, ?, ?, ?, ?)';
+  db.run(sql, [type, description, party, Math.round(Number(total)||0), due_date || null], function(err) {
+    if (err) return res.status(500).json({ success:false, error: err.message });
+    res.json({ success:true, id: this.lastID });
+  });
+});
+
+app.post('/api/credits/:id/payments', (req, res) => {
+  const { id } = req.params;
+  const { amount, payment_method } = req.body;
+  const amt = Math.round(Number(amount)||0);
+  if (!amt || amt <= 0) return res.status(400).json({ success:false, error:'invalid amount' });
+  db.run('INSERT INTO credit_payments (credit_id, amount, payment_method) VALUES (?, ?, ?)', [id, amt, payment_method || 'cash'], function(err) {
+    if (err) return res.status(500).json({ success:false, error: err.message });
+    // Close credit if fully paid
+    db.get('SELECT total, (SELECT COALESCE(SUM(amount),0) FROM credit_payments WHERE credit_id = ?) as paid FROM credits WHERE id = ?', [id, id], (err2, row) => {
+      if (row && Math.round(Number(row.paid)||0) >= Math.round(Number(row.total)||0)) {
+        db.run('UPDATE credits SET status = "closed", paid = ? WHERE id = ?', [Math.round(Number(row.paid)||0), id]);
+      } else if (row) {
+        db.run('UPDATE credits SET paid = ? WHERE id = ?', [Math.round(Number(row.paid)||0), id]);
+      }
+      res.json({ success:true, id: this.lastID });
+    });
+  });
+});
+
+app.put('/api/credits/:id/status', (req, res) => {
+  const { id } = req.params;
+  const { status, created_by } = req.body; // 'open' | 'closed'
+  if (!status) return res.status(400).json({ success:false, error:'status required' });
+  // Read current credit
+  db.get('SELECT * FROM credits WHERE id = ?', [id], (err, credit) => {
+    if (err) return res.status(500).json({ success:false, error: err.message });
+    if (!credit) return res.status(404).json({ success:false, error:'not found' });
+    if (credit.status === status) return res.json({ success:true, changes: 0 });
+    db.run('UPDATE credits SET status = ? WHERE id = ?', [status, id], function(err2) {
+      if (err2) return res.status(500).json({ success:false, error: err2.message });
+      if (status === 'closed') {
+        // Compute paid amount
+        db.get('SELECT COALESCE(SUM(amount),0) as paid FROM credit_payments WHERE credit_id = ?', [id], (e3, sumRow) => {
+          const paid = Math.round(Number(sumRow?.paid || credit.paid || 0));
+          const amount = paid > 0 ? paid : Math.round(Number(credit.total || 0));
+          if (amount <= 0) return res.json({ success:true, changes: this.changes });
+          const type = credit.type === 'payable' ? 'expense' : 'income';
+          const descPrefix = credit.type === 'payable' ? 'Crédito pagado' : 'Crédito cobrado';
+          const description = `${descPrefix}: ${credit.description || ''} ${credit.party ? '('+credit.party+')' : ''}`.trim();
+          db.run('INSERT INTO transactions (type, amount, description, payment_method, created_by) VALUES (?, ?, ?, ?, ?)',
+            [type, amount, description, 'credit', created_by || 1], function(e4){
+              if (e4) return res.status(500).json({ success:false, error: e4.message });
+              return res.json({ success:true, changes: 1, transactionId: this.lastID });
+            });
+        });
+      } else {
+        res.json({ success:true, changes: this.changes });
+      }
+    });
+  });
+});
+
 // Cash summary (for suggested closing amount)
 app.get('/api/cash/summary', (req, res) => {
   // Get last open session and compute cash movements since then

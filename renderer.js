@@ -51,6 +51,14 @@ async function apiInvoke(channel, payload) {
         'toggle-user-status': async () => put(`/users/${payload}/toggle-status`),
         'check-username': async () => get(`/users/check-username${toQuery(payload)}`),
         'reset-password': async () => post(`/users/${payload.id}/reset-password`, { new_password: payload.new_password }),
+        // Credits
+        'credits-list': async () => get(`/credits${toQuery(payload)}`),
+        'credits-create': async () => post('/credits', payload),
+        'credits-add-payment': async () => post(`/credits/${payload.id}/payments`, { amount: payload.amount, payment_method: payload.payment_method }),
+        'credits-set-status': async () => put(`/credits/${payload.id}/status`, { status: payload.status }),
+        // Transactions admin (super admin only)
+        'tx-update': async () => put(`/transactions/${payload.id}`, { amount: payload.amount, description: payload.description, payment_method: payload.payment_method, type: payload.type, user_role: currentUser?.role }),
+        'tx-delete': async () => del(`/transactions/${payload}?user_role=${encodeURIComponent(currentUser?.role||'')}`),
     };
     try {
         if (routes[channel]) {
@@ -796,7 +804,7 @@ function openAppModal({ title, message, confirmText = 'Aceptar', cancelText, onC
     const a = document.getElementById('appModalActions');
     if (!modal || !t || !m || !a) return;
     t.textContent = title || '';
-    m.textContent = message || '';
+    m.innerHTML = message || '';
     a.innerHTML = '';
     const ok = document.createElement('button'); ok.className = 'btn btn-primary'; ok.textContent = confirmText; ok.onclick = () => { modal.style.display = 'none'; try { onConfirm && onConfirm(); } catch(_) {} };
     a.appendChild(ok);
@@ -1298,6 +1306,22 @@ function renderReportsUI() {
                 </div>
             </div>
         </div>
+        <div class="card">
+            <div class="card-header"><h3>Cuentas por Cobrar / Pagar</h3></div>
+            <div class="input-group" style="display:grid; grid-template-columns: 1fr 2fr 1fr 1fr 1fr; gap:10px; align-items:center;">
+                <select id="cr-type"><option value="receivable">Por Cobrar</option><option value="payable">Por Pagar</option></select>
+                <input id="cr-desc" placeholder="Descripción" />
+                <input id="cr-party" placeholder="Cliente/Proveedor" />
+                <input id="cr-total" type="number" step="1" placeholder="Total (COP)" />
+                <button type="button" class="btn btn-primary" id="cr-create">Crear</button>
+            </div>
+            <div class="input-group" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; align-items:center; margin-top:10px;">
+                <select id="cr-filter-type"><option value="">Todos</option><option value="receivable">Por Cobrar</option><option value="payable">Por Pagar</option></select>
+                <select id="cr-filter-status"><option value="open">Abiertos</option><option value="closed">Cerrados</option><option value="">Todos</option></select>
+                <button type="button" class="btn btn-secondary" id="cr-refresh">Actualizar</button>
+            </div>
+            <div id="cr-list" style="max-height:40vh; overflow:auto; margin-top:10px;"></div>
+        </div>
     `;
     // Ensure module becomes visible if menu doesn't toggle correctly
     const reportsContainer = document.getElementById('reports-module');
@@ -1306,6 +1330,12 @@ function renderReportsUI() {
     module.querySelector('#rep-export').addEventListener('click', exportTransactionsToCSV);
     module.querySelector('#rep-print').addEventListener('click', printTransactions);
     module.querySelector('#rep-print-summary').addEventListener('click', printSummary);
+    // Credits bindings
+    const crCreate = module.querySelector('#cr-create');
+    const crRefresh = module.querySelector('#cr-refresh');
+    if (crCreate && !crCreate._bound) { crCreate.addEventListener('click', createCredit); crCreate._bound = true; }
+    if (crRefresh && !crRefresh._bound) { crRefresh.addEventListener('click', refreshCredits); crRefresh._bound = true; }
+    refreshCredits();
     module.querySelector('#rep-today').addEventListener('click', () => {
         const now = new Date();
         const yyyy = now.getFullYear();
@@ -1359,6 +1389,69 @@ function renderReportsUI() {
     });
 }
 
+async function createCredit() {
+    const module = document.getElementById('reports-module');
+    const type = module.querySelector('#cr-type').value;
+    const description = String(module.querySelector('#cr-desc').value||'').trim();
+    const party = String(module.querySelector('#cr-party').value||'').trim();
+    const total = (()=>{ const v = String(module.querySelector('#cr-total').value||'').replace(/[^0-9]/g,''); return v? parseInt(v,10): 0; })();
+    if (!total) { alert('Total inválido'); return; }
+    let res;
+    try { res = await apiInvoke('credits-create', { type, description, party, total }); }
+    catch (e) { showNotification('Error de red al crear', 'error'); return; }
+    if (res.success === false) { showNotification('Error creando crédito', 'error'); return; }
+    module.querySelector('#cr-desc').value=''; module.querySelector('#cr-party').value=''; module.querySelector('#cr-total').value='';
+    showNotification('Registro creado', 'success');
+    refreshCredits();
+}
+
+async function refreshCredits() {
+    const module = document.getElementById('reports-module');
+    const type = module.querySelector('#cr-filter-type').value;
+    const status = module.querySelector('#cr-filter-status').value || 'open';
+    const list = await apiInvoke('credits-list', { type, status });
+    const container = module.querySelector('#cr-list');
+    container.innerHTML = (list||[]).map(c => {
+        const balance = Math.max(0, Math.round(Number(c.total||0) - Number(c.paid_amount||0)));
+        const badge = c.type === 'receivable' ? 'Por Cobrar' : 'Por Pagar';
+        return `<div style="display:grid; grid-template-columns: 2fr 1fr 1fr auto; gap:10px; align-items:center; padding:8px; border-bottom:1px solid rgba(255,255,255,0.08);">
+            <div>
+                <div style="color:#fff; font-weight:600;">${c.description || '(sin descripción)'} — <span style="color:#d4af37;">${badge}</span></div>
+                <div style="color:#b0b0b0; font-size:12px;">${c.party || ''} ${c.due_date ? '· vence ' + c.due_date : ''}</div>
+            </div>
+            <div style="text-align:right; color:#b0b0b0;">Total ${formatCurrency(c.total||0)}</div>
+            <div style="text-align:right; color:#b0b0b0;">Pagado ${formatCurrency(c.paid_amount||0)}</div>
+            <div style="text-align:right; font-weight:700; color:${balance>0?'#e67e22':'#27ae60'};">${formatCurrency(balance)}</div>
+            <div style="grid-column: 1 / -1; display:flex; gap:10px; justify-content:flex-end;">
+                <input type="number" min="1" placeholder="Abono (COP)" id="cr-pay-${c.id}" style="max-width:160px;" />
+                <button class="btn btn-secondary" onclick="payCredit(${c.id})">Abonar</button>
+                <button class="btn btn-secondary" onclick="setCreditStatus(${c.id}, '${c.status==='open'?'closed':'open'}')">${c.status==='open'?'Marcar Cerrado':'Reabrir'}</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function payCredit(id) {
+    const module = document.getElementById('reports-module');
+    const input = module.querySelector(`#cr-pay-${id}`);
+    const amount = (()=>{ const v = String(input?.value||'').replace(/[^0-9]/g,''); return v? parseInt(v,10): 0; })();
+    if (!amount) { alert('Monto inválido'); return; }
+    let res; try { res = await apiInvoke('credits-add-payment', { id, amount, payment_method: 'cash' }); } catch (e) { showNotification('Error de red al abonar', 'error'); return; }
+    if (res.success === false) { showNotification('Error al abonar', 'error'); return; }
+    showNotification('Abono registrado', 'success');
+    refreshCredits();
+}
+
+async function setCreditStatus(id, status) {
+    const res = await apiInvoke('credits-set-status', { id, status, created_by: currentUser?.id || 1 });
+    if (res.success === false) { showNotification('Error al actualizar estado', 'error'); return; }
+    refreshCredits();
+}
+
+// expose helpers
+window.payCredit = payCredit;
+window.setCreditStatus = setCreditStatus;
+
 async function refreshTransactions() {
     const module = document.getElementById('reports-module');
     const from = module.querySelector('#rep-from').value;
@@ -1370,7 +1463,38 @@ async function refreshTransactions() {
     try {
         const rows = await apiInvoke('get-transactions-filtered', { from, to, type, payment });
         lastTransactions = rows;
-        list.innerHTML = rows.map(r => `<div style=\"display:flex; justify-content:space-between; padding:8px; border-bottom:1px solid rgba(255,255,255,0.1);\"><span>${r.created_at} - ${r.description || ''} ${r.payment_method ? '('+r.payment_method+')' : ''} — ${r.created_by_username || ''}</span><span>${r.type === 'expense' ? '-' : ''}${formatCurrency(r.amount)}</span></div>`).join('');
+        list.innerHTML = rows.map(r => {
+            const canAdmin = currentUser && currentUser.role === 'super_admin';
+            const left = `${r.created_at} - ${r.description || ''} ${r.payment_method ? '('+r.payment_method+')' : ''} — ${r.created_by_username || ''}`;
+            const right = `${r.type === 'expense' ? '-' : ''}${formatCurrency(r.amount)}`;
+            const actions = canAdmin ? `<div style="display:flex; gap:6px; margin-left:10px;">
+                <button class="btn btn-secondary btn-small" data-tx-edit="${r.id}">Editar</button>
+                <button class="btn btn-secondary btn-small" data-tx-del="${r.id}">Eliminar</button>
+            </div>` : '';
+            return `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid rgba(255,255,255,0.1);">
+                <div style="display:flex; align-items:center;">${left}${actions}</div>
+                <span>${right}</span>
+            </div>`;
+        }).join('');
+        if (currentUser && currentUser.role === 'super_admin') {
+            list.querySelectorAll('[data-tx-edit]').forEach(btn => {
+                btn.addEventListener('click', () => openTxEditor(parseInt(btn.getAttribute('data-tx-edit'))));
+            });
+            list.querySelectorAll('[data-tx-del]').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const id = parseInt(btn.getAttribute('data-tx-del'));
+                    if (!confirm('¿Eliminar transacción?')) return;
+                    try {
+                        const res = await apiInvoke('tx-delete', id);
+                        if (res && res.success === false) { showNotification('Error al eliminar', 'error'); return; }
+                        showNotification('Transacción eliminada', 'success');
+                        refreshTransactions();
+                    } catch (e) {
+                        showNotification('Error de red al eliminar', 'error');
+                    }
+                });
+            });
+        }
         const income = rows.filter(r => r.type === 'income').reduce((s, r) => s + Number(r.amount || 0), 0);
         const expense = rows.filter(r => r.type === 'expense').reduce((s, r) => s + Number(r.amount || 0), 0);
         const balance = income - expense;
@@ -1389,6 +1513,33 @@ async function refreshTransactions() {
     } catch (e) {
         list.textContent = 'Error al cargar';
     }
+}
+
+function openTxEditor(id) {
+    const tx = (lastTransactions||[]).find(t => t.id === id);
+    if (!tx) return;
+    openAppModal({
+        title: 'Editar Transacción',
+        message: `<div style="display:grid; gap:10px;">
+            <select id="txe-type"><option value="income" ${tx.type==='income'?'selected':''}>Ingreso</option><option value="expense" ${tx.type==='expense'?'selected':''}>Gasto</option></select>
+            <input id="txe-desc" placeholder="Descripción" value="${(tx.description||'').replace(/\"/g,'&quot;')}" />
+            <input id="txe-amount" type="number" step="1" placeholder="Monto (COP)" value="${tx.amount}" />
+            <select id="txe-pay"><option value="cash" ${tx.payment_method==='cash'?'selected':''}>Efectivo</option><option value="transfer" ${tx.payment_method==='transfer'?'selected':''}>Transferencia</option></select>
+        </div>`,
+        confirmText: 'Guardar',
+        cancelText: 'Cancelar',
+        onConfirm: async () => {
+            const type = document.getElementById('txe-type').value;
+            const description = String(document.getElementById('txe-desc').value||'').trim();
+            const amount = (()=>{ const v = String(document.getElementById('txe-amount').value||'').replace(/[^0-9]/g,''); return v? parseInt(v,10): 0; })();
+            const payment_method = document.getElementById('txe-pay').value;
+            if (!amount) { showNotification('Monto inválido', 'error'); return; }
+            const res = await apiInvoke('tx-update', { id, type, description, amount, payment_method });
+            if (res.success === false) { showNotification('Error al guardar', 'error'); return; }
+            showNotification('Transacción actualizada', 'success');
+            refreshTransactions();
+        }
+    });
 }
 
 function exportTransactionsToCSV() {

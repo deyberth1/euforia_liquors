@@ -351,6 +351,31 @@ db.serialize(() => {
             console.log('Sample tables inserted');
         }
     });
+
+    // Credits (accounts receivable/payable)
+    db.run(`CREATE TABLE IF NOT EXISTS credits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL, -- 'receivable' | 'payable'
+        description TEXT,
+        party TEXT,
+        total INTEGER NOT NULL,
+        paid INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'open', -- 'open' | 'closed'
+        due_date DATE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS credit_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        credit_id INTEGER NOT NULL,
+        amount INTEGER NOT NULL,
+        payment_method TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (credit_id) REFERENCES credits (id)
+    )`);
+
+    db.run("CREATE INDEX IF NOT EXISTS idx_credits_status ON credits(status)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_credits_type ON credits(type)");
 });
 
 console.log('Database initialized successfully');
