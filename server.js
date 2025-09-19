@@ -115,17 +115,21 @@ app.get('/api/health', (req, res) => {
 app.get('/api/dashboard/summary', (req, res) => {
   const salesSql = "SELECT COALESCE(SUM(total), 0) as totalSales FROM sales WHERE DATE(created_at, 'localtime') = DATE('now','localtime') AND status = 'paid'";
   db.get(salesSql, [], (err, sales) => {
-    if (err) return res.json({ totalSales: 0, activeTables: 0, lowStockProducts: 0, totalTransactions: 0 });
-    const tablesSql = "SELECT COUNT(*) as activeTables FROM tables WHERE status = 'occupied'";
-    db.get(tablesSql, [], (err, tables) => {
-      if (err) return res.json({ totalSales: sales.totalSales || 0, activeTables: 0, lowStockProducts: 0, totalTransactions: 0 });
-      const stockSql = "SELECT COUNT(*) as lowStockProducts FROM products WHERE stock < 10";
-      db.get(stockSql, [], (err, stock) => {
-        if (err) return res.json({ totalSales: sales.totalSales || 0, activeTables: tables.activeTables || 0, lowStockProducts: 0, totalTransactions: 0 });
-        const transSql = "SELECT COUNT(*) as totalTransactions FROM sales WHERE DATE(created_at, 'localtime') = DATE('now','localtime')";
-        db.get(transSql, [], (err, trans) => {
-          if (err) return res.json({ totalSales: sales.totalSales || 0, activeTables: tables.activeTables || 0, lowStockProducts: stock.lowStockProducts || 0, totalTransactions: 0 });
-          res.json({ totalSales: sales.totalSales || 0, activeTables: tables.activeTables || 0, lowStockProducts: stock.lowStockProducts || 0, totalTransactions: trans.totalTransactions || 0 });
+    if (err) return res.json({ totalSales: 0, totalIncomeToday: 0, activeTables: 0, lowStockProducts: 0, totalTransactions: 0 });
+    const incomeSql = "SELECT COALESCE(SUM(amount),0) as totalIncomeToday FROM transactions WHERE type = 'income' AND DATE(created_at, 'localtime') = DATE('now','localtime')";
+    db.get(incomeSql, [], (e0, inc) => {
+      const incomes = e0 ? 0 : (inc?.totalIncomeToday || 0);
+      const tablesSql = "SELECT COUNT(*) as activeTables FROM tables WHERE status = 'occupied'";
+      db.get(tablesSql, [], (err, tables) => {
+        if (err) return res.json({ totalSales: sales.totalSales || 0, totalIncomeToday: incomes, activeTables: 0, lowStockProducts: 0, totalTransactions: 0 });
+        const stockSql = "SELECT COUNT(*) as lowStockProducts FROM products WHERE stock < 10";
+        db.get(stockSql, [], (err, stock) => {
+          if (err) return res.json({ totalSales: sales.totalSales || 0, totalIncomeToday: incomes, activeTables: tables.activeTables || 0, lowStockProducts: 0, totalTransactions: 0 });
+          const transSql = "SELECT COUNT(*) as totalTransactions FROM sales WHERE DATE(created_at, 'localtime') = DATE('now','localtime')";
+          db.get(transSql, [], (err, trans) => {
+            if (err) return res.json({ totalSales: sales.totalSales || 0, totalIncomeToday: incomes, activeTables: tables.activeTables || 0, lowStockProducts: stock.lowStockProducts || 0, totalTransactions: 0 });
+            res.json({ totalSales: sales.totalSales || 0, totalIncomeToday: incomes, activeTables: tables.activeTables || 0, lowStockProducts: stock.lowStockProducts || 0, totalTransactions: trans.totalTransactions || 0 });
+          });
         });
       });
     });
@@ -607,18 +611,20 @@ app.get('/api/cash/summary', (req, res) => {
 });
 
 app.post('/api/transactions/income', (req, res) => {
-  const { description, amount, user_id } = req.body;
-  const sql = "INSERT INTO transactions (type, description, amount, created_by) VALUES ('income', ?, ?, ?)";
-  db.run(sql, [description, Math.round(Number(amount)||0), user_id || 1], function(err) {
+  const { description, amount, user_id, payment_method } = req.body;
+  const pay = payment_method === 'transfer' ? 'transfer' : 'cash';
+  const sql = "INSERT INTO transactions (type, description, amount, payment_method, created_by) VALUES ('income', ?, ?, ?, ?)";
+  db.run(sql, [description, Math.round(Number(amount)||0), pay, user_id || 1], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, id: this.lastID });
   });
 });
 
 app.post('/api/transactions/expense', (req, res) => {
-  const { description, amount, user_id } = req.body;
-  const sql = "INSERT INTO transactions (type, description, amount, created_by) VALUES ('expense', ?, ?, ?)";
-  db.run(sql, [description, Math.round(Number(amount)||0), user_id || 1], function(err) {
+  const { description, amount, user_id, payment_method } = req.body;
+  const pay = payment_method === 'transfer' ? 'transfer' : 'cash';
+  const sql = "INSERT INTO transactions (type, description, amount, payment_method, created_by) VALUES ('expense', ?, ?, ?, ?)";
+  db.run(sql, [description, Math.round(Number(amount)||0), pay, user_id || 1], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, id: this.lastID });
   });

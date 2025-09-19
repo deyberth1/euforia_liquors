@@ -366,6 +366,8 @@ function updateDashboardSummary(data) {
     const tablesEl = document.getElementById('dash-active-tables');
     const transEl = document.getElementById('dash-total-trans');
     if (salesEl) salesEl.textContent = formatCurrency(data.totalSales || 0);
+    const incLbl = document.getElementById('dash-income-today');
+    if (incLbl && typeof data.totalIncomeToday !== 'undefined') incLbl.textContent = formatCurrency(data.totalIncomeToday || 0);
     if (tablesEl) tablesEl.textContent = String(data.activeTables || 0);
     if (transEl) transEl.textContent = String(data.totalTransactions || 0);
 }
@@ -1512,9 +1514,10 @@ function renderReportsUI() {
         </div>
         <div class="card">
             <div class="card-header"><h3>Agregar Ingreso / Gasto</h3></div>
-            <div class="input-group" style="display:grid; grid-template-columns: 2fr 1fr 1fr; gap:10px;">
+            <div class="input-group" style="display:grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap:10px;">
                 <input id="tx-desc" placeholder="Descripción" />
                 <input id="tx-amount" type="number" step="1" placeholder="Monto (COP)" />
+                <select id="tx-payment"><option value="cash">Efectivo</option><option value="transfer">Transferencia</option></select>
                 <div style="display:flex; gap:10px;">
                     <button type="button" class="btn btn-primary" id="tx-add-income">Agregar Ingreso</button>
                     <button type="button" class="btn btn-secondary" id="tx-add-expense">Agregar Gasto</button>
@@ -1581,9 +1584,10 @@ function renderReportsUI() {
     module.querySelector('#tx-add-income').addEventListener('click', async () => {
         const desc = module.querySelector('#tx-desc').value.trim();
         const amount = Math.round(parseFloat(module.querySelector('#tx-amount').value));
+        const payment_method = module.querySelector('#tx-payment').value;
         if (!desc || isNaN(amount)) { alert('Complete descripción y monto'); return; }
         const btn = module.querySelector('#tx-add-income'); const orig = btn.textContent; btn.textContent = 'Guardando...'; btn.disabled = true;
-        const res = await apiInvoke('add-income', { description: desc, amount, user_id: currentUser?.id || 1 });
+        const res = await apiInvoke('add-income', { description: desc, amount, payment_method, user_id: currentUser?.id || 1 });
         btn.textContent = orig; btn.disabled = false;
         if (res.success === false) { showNotification('Error al agregar ingreso', 'error'); return; }
         showNotification('Ingreso agregado', 'success');
@@ -1593,9 +1597,10 @@ function renderReportsUI() {
     module.querySelector('#tx-add-expense').addEventListener('click', async () => {
         const desc = module.querySelector('#tx-desc').value.trim();
         const amount = Math.round(parseFloat(module.querySelector('#tx-amount').value));
+        const payment_method = module.querySelector('#tx-payment').value;
         if (!desc || isNaN(amount)) { alert('Complete descripción y monto'); return; }
         const btn = module.querySelector('#tx-add-expense'); const orig = btn.textContent; btn.textContent = 'Guardando...'; btn.disabled = true;
-        const res = await apiInvoke('add-expense', { description: desc, amount, user_id: currentUser?.id || 1 });
+        const res = await apiInvoke('add-expense', { description: desc, amount, payment_method, user_id: currentUser?.id || 1 });
         btn.textContent = orig; btn.disabled = false;
         if (res.success === false) { showNotification('Error al agregar gasto', 'error'); return; }
         showNotification('Gasto agregado', 'success');
