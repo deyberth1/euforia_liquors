@@ -855,6 +855,12 @@
             </div>
             
             <div class="nav-menu">
+                <div class="nav-item" id="location-switcher" style="display:none; cursor:default;">
+                    <span class="icon">🏬</span>
+                    <span>
+                        <select id="active-location" style="width:160px;"></select>
+                    </span>
+                </div>
                 <div class="nav-item active" onclick="showModule('dashboard')">
                     <span class="icon">📊</span>
                     <span>Dashboard</span>
@@ -1001,6 +1007,7 @@
                         <div class="action-buttons">
                             <button type="button" class="btn btn-primary">Finalizar Venta</button>
                             <button type="button" class="btn btn-secondary">Guardar Cuenta</button>
+                            <button type="button" class="btn btn-secondary" id="pos-clear">Vaciar Cuenta</button>
                         </div>
                     </div>
                 </div>

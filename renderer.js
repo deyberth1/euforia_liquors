@@ -84,33 +84,64 @@ function toQuery(obj) {
 }
 
 async function get(pathname) {
-    const res = await fetch(`${API_BASE}${pathname}`, { cache: 'no-store' });
-    if (!res.ok) throw new Error('network');
+    const headers = {};
+    try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
+    const res = await fetch(`${API_BASE}${pathname}`, { cache: 'no-store', headers });
+    if (!res.ok) {
+        let msg = 'network';
+        try { const j = await res.json(); msg = j?.error || JSON.stringify(j); } catch(_) { try { msg = await res.text(); } catch(__) {} }
+        throw new Error(msg || 'network');
+    }
     return await res.json();
 }
 async function post(pathname, body) {
-    const res = await fetch(`${API_BASE}${pathname}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {}),
-        cache: 'no-store'
-    });
-    if (!res.ok) throw new Error('network');
-    return await res.json();
+    const headers = { 'Content-Type': 'application/json' };
+    try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
+    const doFetch = async () => {
+        const res = await fetch(`${API_BASE}${pathname}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body || {}),
+            cache: 'no-store'
+        });
+        if (!res.ok) {
+            let msg = 'network';
+            try { const j = await res.json(); msg = j?.error || JSON.stringify(j); } catch(_) { try { msg = await res.text(); } catch(__) {} }
+            const err = new Error(msg || 'network'); err.httpStatus = res.status; throw err;
+        }
+        return await res.json();
+    };
+    try { return await doFetch(); } catch (e) {
+        // Simple retry once for transient errors
+        await new Promise(r => setTimeout(r, 300));
+        return await doFetch();
+    }
 }
 async function put(pathname, body) {
+    const headers = { 'Content-Type': 'application/json' };
+    try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
     const res = await fetch(`${API_BASE}${pathname}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(body || {}),
         cache: 'no-store'
     });
-    if (!res.ok) throw new Error('network');
+    if (!res.ok) {
+        let msg = 'network';
+        try { const j = await res.json(); msg = j?.error || JSON.stringify(j); } catch(_) { try { msg = await res.text(); } catch(__) {} }
+        const err = new Error(msg || 'network'); err.httpStatus = res.status; throw err;
+    }
     return await res.json();
 }
 async function del(pathname) {
-    const res = await fetch(`${API_BASE}${pathname}`, { method: 'DELETE', cache: 'no-store' });
-    if (!res.ok) throw new Error('network');
+    const headers = {};
+    try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
+    const res = await fetch(`${API_BASE}${pathname}`, { method: 'DELETE', cache: 'no-store', headers });
+    if (!res.ok) {
+        let msg = 'network';
+        try { const j = await res.json(); msg = j?.error || JSON.stringify(j); } catch(_) { try { msg = await res.text(); } catch(__) {} }
+        const err = new Error(msg || 'network'); err.httpStatus = res.status; throw err;
+    }
     return await res.json();
 }
 
@@ -212,6 +243,43 @@ function showModule(moduleName) {
             if (isSuper) { loadUsersData(); }
             else { showNotification('Acceso restringido', 'error'); showModule('dashboard'); }
             break;
+    }
+    // Setup location switcher for super admin
+    const locSwitch = document.getElementById('location-switcher');
+    if (locSwitch && !locSwitch._bound) {
+        if (isSuper) {
+            locSwitch.style.display = '';
+            refreshLocationsDropdown();
+        } else {
+            locSwitch.style.display = 'none';
+        }
+        locSwitch._bound = true;
+    } else if (locSwitch && isSuper) {
+        // if already bound but became visible later (after login), refresh
+        locSwitch.style.display = '';
+        refreshLocationsDropdown();
+    }
+}
+
+async function refreshLocationsDropdown() {
+    try {
+        const locations = await get('/locations');
+        const sel = document.getElementById('active-location');
+        if (!sel) return;
+        const options = (locations||[]).filter(l=>l.is_active!==0).map(l=>`<option value="${l.id}">${l.name}</option>`).join('');
+        sel.innerHTML = options || '<option value="1">Euforia Liquors</option>';
+        try {
+            const saved = localStorage.getItem('activeLocationId') || '1';
+            if (Array.from(sel.options).some(o=>o.value===saved)) sel.value = saved; else sel.value = '1';
+        } catch(_) {}
+        sel.onchange = () => {
+            try { localStorage.setItem('activeLocationId', sel.value); } catch(_) {}
+            // Reload current module data
+            const last = localStorage.getItem('lastModule') || 'dashboard';
+            showModule(last);
+        };
+    } catch (e) {
+        // ignore
     }
 }
 
@@ -338,6 +406,8 @@ async function loadPOSData() {
         renderTicket();
         // Ensure POS buttons are bound after DOM elements exist
         bindPosButtons();
+        // Try to sync offline sales silently
+        try { await syncOfflineSales(); } catch(_) {}
     } catch (error) {
         console.error('Error loading POS data:', error);
     }
@@ -455,6 +525,27 @@ function updateQuantity(productId, change) {
         }
         renderTicket();
     }
+}
+
+// Offline sales queue (IndexedDB via simple localStorage fallback)
+function getOfflineQueue() {
+    try { return JSON.parse(localStorage.getItem('offlineSalesQueue')||'[]'); } catch(_) { return []; }
+}
+function setOfflineQueue(q) {
+    try { localStorage.setItem('offlineSalesQueue', JSON.stringify(q)); } catch(_) {}
+}
+async function syncOfflineSales() {
+    const q = getOfflineQueue();
+    if (!q.length) return;
+    const remaining = [];
+    for (const sale of q) {
+        try {
+            await apiInvoke('process-sale', sale);
+        } catch (e) {
+            remaining.push(sale);
+        }
+    }
+    setOfflineQueue(remaining);
 }
 
 function renderTableSelection(tables) {
@@ -607,10 +698,22 @@ function renderTablesAdmin(tables) {
     saveBtn.onclick = async () => {
         const payload = { name: nameEl.value.trim(), type: typeEl.value, capacity: parseInt(capEl.value)||4 };
         if (!payload.name) { alert('Nombre requerido'); return; }
-        if (editingId) {
-            payload.id = editingId; const res = await apiInvoke('update-table', payload); if (res.success === false) alert('Error al actualizar');
-        } else {
-            const res = await apiInvoke('create-table', payload); if (res.success === false) alert('Error al crear');
+        const original = saveBtn.textContent; saveBtn.textContent = 'Guardando...'; saveBtn.disabled = true;
+        try {
+            let res;
+            if (editingId) {
+                payload.id = editingId;
+                res = await apiInvoke('update-table', payload);
+            } else {
+                res = await apiInvoke('create-table', payload);
+            }
+            if (res && res.success === false) {
+                showNotification(res.error || 'Error al guardar', 'error');
+            }
+        } catch (e) {
+            showNotification('Error de red al guardar', 'error');
+        } finally {
+            saveBtn.textContent = original; saveBtn.disabled = false;
         }
         editingId = null; nameEl.value=''; capEl.value=''; typeEl.value='table'; saveBtn.textContent='Guardar'; cancelBtn.classList.add('hidden');
         loadTablesData();
@@ -655,7 +758,14 @@ async function loadTableOrder(table) {
         suppressPosReload = true;
         showModule('pos');
         await loadPOSData();
-        currentTicket = orderData.items || [];
+        // Merge duplicated product rows into single lines
+        const merged = Object.create(null);
+        (orderData.items || []).forEach(it => {
+            const key = String(it.id);
+            if (!merged[key]) merged[key] = { id: it.id, name: it.name, price: it.price, quantity: 0 };
+            merged[key].quantity += parseInt(it.quantity)||0;
+        });
+        currentTicket = Object.values(merged);
         updateCurrentTableLabel();
         const tableSelection = document.querySelector('#table-selection');
         if (tableSelection) {
@@ -678,6 +788,7 @@ async function loadTableOrder(table) {
 function bindPosButtons() {
     const finalizeBtn = document.querySelector('#pos-module .btn-primary');
     const saveBtn = document.querySelector('#pos-module .btn-secondary');
+    const clearBtn = document.querySelector('#pos-clear');
     if (finalizeBtn && !finalizeBtn._bound) {
         finalizeBtn.addEventListener('click', finalizeSale);
         finalizeBtn._bound = true;
@@ -686,32 +797,57 @@ function bindPosButtons() {
         saveBtn.addEventListener('click', saveOrder);
         saveBtn._bound = true;
     }
+    if (clearBtn && !clearBtn._bound) {
+        clearBtn.addEventListener('click', clearCurrentTicket);
+        clearBtn._bound = true;
+    }
 }
 
 bindPosButtons();
 
 async function finalizeSale() {
-    if (currentTicket.length === 0) {
-        showNotification('No hay productos en la cuenta', 'error');
-        return;
-    }
     
     const btnFinalize = document.querySelector('#pos-module .btn-primary');
     const originalTextFinalize = btnFinalize?.textContent || '';
     try {
         const selectionValue = document.querySelector('#table-selection')?.value || 'direct';
         const tableId = selectedTable?.id ?? (selectionValue === 'direct' ? null : parseInt(selectionValue));
+        if ((currentTicket.length === 0 || currentTicket.every(i => (i.quantity||0) <= 0))) {
+            if (!tableId) { showNotification('No hay productos en la cuenta', 'error'); return; }
+            // Close/clear table with zero total
+            const payload = {
+                items: [],
+                tableId,
+                payment_method: document.querySelector('#payment-method')?.value || 'cash',
+                total: 0,
+                idempotency_key: `${Date.now()}-${currentUser?.id||0}-${Math.random().toString(36).slice(2,8)}`
+            };
+            if (btnFinalize) { btnFinalize.textContent = 'Procesando...'; btnFinalize.disabled = true; }
+            const result = await apiInvoke('process-sale', payload);
+            if (result && result.success) {
+                showNotification('Mesa liberada', 'success');
+                currentTicket = [];
+                selectedTable = null;
+                renderTicket();
+                showModule('dashboard');
+                await loadDashboardData();
+            } else {
+                showNotification('Error al liberar mesa', 'error');
+            }
+            return;
+        }
         const saleData = {
-            items: currentTicket,
+            items: currentTicket.filter(i => (parseInt(i.quantity)||0) > 0).map(i => ({ id: i.id, quantity: parseInt(i.quantity)||0, price: Math.round(Number(i.price)||0) })),
             tableId: tableId,
             payment_method: document.querySelector('#payment-method')?.value || 'cash',
-            total: currentTicket.reduce((sum, item) => sum + (item.price * item.quantity), 0)
+            total: currentTicket.reduce((sum, item) => sum + (item.price * item.quantity), 0),
+            idempotency_key: `${Date.now()}-${currentUser?.id||0}-${Math.random().toString(36).slice(2,8)}`
         };
         
         if (btnFinalize) { btnFinalize.textContent = 'Procesando...'; btnFinalize.disabled = true; }
         const result = await apiInvoke('process-sale', saleData);
         
-        if (result.success) {
+        if (result && result.success) {
             showNotification('Venta finalizada', 'success');
             openAppModal({ title: 'Venta', message: 'Venta procesada correctamente.', confirmText: 'OK' });
             currentTicket = [];
@@ -721,11 +857,20 @@ async function finalizeSale() {
             await loadDashboardData();
             setTimeout(() => { try { loadDashboardData(); } catch (_) {} }, 300);
         } else {
-            showNotification('Error al procesar la venta', 'error');
+            showNotification(result?.error || 'Error al procesar la venta', 'error');
         }
     } catch (error) {
-        showNotification('Error al procesar la venta', 'error');
-        console.error(error);
+        // En caso de error, guardar en cola offline para sincronizar luego
+        const queued = {
+            items: currentTicket,
+            tableId: null,
+            payment_method: document.querySelector('#payment-method')?.value || 'cash',
+            total: currentTicket.reduce((sum, item) => sum + (item.price * item.quantity), 0),
+            idempotency_key: `${Date.now()}-${currentUser?.id||0}-${Math.random().toString(36).slice(2,8)}`
+        };
+        const q = getOfflineQueue(); q.push(queued); setOfflineQueue(q);
+        showNotification('Venta guardada offline. Se sincronizará automáticamente.', 'success');
+        console.error('Venta en cola offline por error de red:', error);
     }
     finally {
         if (btnFinalize) { btnFinalize.textContent = originalTextFinalize; btnFinalize.disabled = false; }
@@ -733,18 +878,27 @@ async function finalizeSale() {
 }
 
 async function saveOrder() {
-    if (currentTicket.length === 0) {
-        showNotification('No hay productos en la cuenta', 'error');
-        return;
-    }
     
     const btnSave = document.querySelector('#pos-module .btn-secondary');
     const originalTextSave = btnSave?.textContent || '';
     try {
         const selectionValue = document.querySelector('#table-selection')?.value || 'direct';
         const tableId = selectedTable?.id ?? (selectionValue === 'direct' ? null : parseInt(selectionValue));
+        if ((!currentTicket.length || currentTicket.every(i => (i.quantity||0) <= 0))) {
+            if (!tableId) { showNotification('No hay productos en la cuenta', 'error'); return; }
+            // Save empty to clear pending order and free table
+            const orderData = { items: [], tableId, payment_method: document.querySelector('#payment-method')?.value || 'cash' };
+            if (btnSave) { btnSave.textContent = 'Guardando...'; btnSave.disabled = true; }
+            const result = await apiInvoke('save-order', orderData);
+            if (result && result.success) {
+                showNotification('Mesa liberada', 'success');
+            } else {
+                showNotification('Error al limpiar mesa', 'error');
+            }
+            return;
+        }
         const orderData = {
-            items: currentTicket,
+            items: currentTicket.filter(i => (parseInt(i.quantity)||0) > 0).map(i => ({ id: i.id, quantity: parseInt(i.quantity)||0, price: Math.round(Number(i.price)||0) })),
             tableId: tableId,
             payment_method: document.querySelector('#payment-method')?.value || 'cash'
         };
@@ -752,11 +906,11 @@ async function saveOrder() {
         if (btnSave) { btnSave.textContent = 'Guardando...'; btnSave.disabled = true; }
         const result = await apiInvoke('save-order', orderData);
         
-        if (result.success) {
+        if (result && result.success) {
             showNotification('Cuenta guardada', 'success');
             openAppModal({ title: 'Cuenta', message: 'Cuenta guardada correctamente.', confirmText: 'OK' });
         } else {
-            showNotification('Error al guardar la cuenta', 'error');
+            showNotification(result?.error || 'Error al guardar la cuenta', 'error');
         }
     } catch (error) {
         showNotification('Error al guardar la cuenta', 'error');
@@ -888,6 +1042,7 @@ window.updateQuantity = updateQuantity;
 window.selectTable = selectTable;
 window.finalizeSale = finalizeSale;
 window.saveOrder = saveOrder;
+window.clearCurrentTicket = clearCurrentTicket;
 
 function updateCurrentTableLabel() {
     const label = document.getElementById('current-table');
@@ -901,6 +1056,26 @@ function updateCurrentTableLabel() {
         } else {
             const selectedOption = document.querySelector('#table-selection')?.options[document.querySelector('#table-selection')?.selectedIndex];
             label.textContent = selectedOption?.textContent || 'Venta Directa';
+        }
+    }
+}
+
+async function clearCurrentTicket() {
+    if (!confirm('¿Vaciar la cuenta actual?')) return;
+    const selectionValue = document.querySelector('#table-selection')?.value || 'direct';
+    const tableId = selectedTable?.id ?? (selectionValue === 'direct' ? null : parseInt(selectionValue));
+    currentTicket = [];
+    renderTicket();
+    if (tableId) {
+        try {
+            const result = await apiInvoke('save-order', { items: [], tableId, payment_method: document.querySelector('#payment-method')?.value || 'cash' });
+            if (result && result.success) {
+                showNotification('Mesa liberada', 'success');
+            } else {
+                showNotification('No se pudo limpiar la mesa', 'error');
+            }
+        } catch (e) {
+            showNotification('Error de red al limpiar', 'error');
         }
     }
 }
@@ -1001,11 +1176,12 @@ function renderInventory(products) {
         tbody.innerHTML = '';
         list.forEach(p => {
             const tr = document.createElement('tr');
+            tr.setAttribute('data-id', String(p.id));
             tr.innerHTML = `
-                <td style=\"padding:8px;\">${p.name}</td>
-                <td style=\"padding:8px; text-align:right;\">${formatCurrency(p.price)}</td>
-                <td style=\"padding:8px; text-align:right;\">${p.stock}</td>
-                <td style=\"padding:8px;\">${p.category || ''}</td>
+                <td style=\"padding:8px;\" data-col=\"name\">${p.name}</td>
+                <td style=\"padding:8px; text-align:right;\" data-col=\"price\">${formatCurrency(p.price)}</td>
+                <td style=\"padding:8px; text-align:right;\" data-col=\"stock\">${p.stock}</td>
+                <td style=\"padding:8px;\" data-col=\"category\">${p.category || ''}</td>
                 <td style=\"padding:8px; display:flex; gap:8px; justify-content:center;\">
                     <button type=\"button\" class=\"btn btn-secondary\" data-edit=\"${p.id}\">Editar</button>
                     <button type=\"button\" class=\"btn btn-secondary\" data-del=\"${p.id}\">Eliminar</button>
@@ -1029,23 +1205,56 @@ function renderInventory(products) {
     tbody.addEventListener('click', async (e) => {
         const btn = e.target.closest('button');
         if (!btn) return;
+        const tr = btn.closest('tr');
+        const id = tr ? parseInt(tr.getAttribute('data-id')) : NaN;
+        const prod = products.find(x => x.id === id);
         if (btn.dataset.edit) {
-            const id = parseInt(btn.dataset.edit);
-            const prod = products.find(x => x.id === id);
-            if (!prod) return;
-            editingId = id;
-            nameEl.value = prod.name; priceEl.value = String(Math.round(Number(prod.price) || 0)); stockEl.value = String(prod.stock);
-            if (prod.category && Array.from(catSelect.options).some(o => o.value === prod.category)) {
-                catSelect.value = prod.category;
-                catNew.classList.add('hidden');
-                catNew.value = '';
-            } else {
-                catSelect.value = '__new__';
-                catNew.classList.remove('hidden');
-                catNew.value = prod.category || '';
+            if (!prod || !tr) return;
+            if (tr.getAttribute('data-editing') === '1') {
+                // Save inline edits
+                const val = (sel) => tr.querySelector(sel)?.value || '';
+                const payload = {
+                    id,
+                    name: String(val('input.inv-name')||'').trim(),
+                    price: (()=>{ const v=String(val('input.inv-price')||'').replace(/[^0-9]/g,''); return v?parseInt(v,10):0; })(),
+                    stock: (()=>{ const v=String(val('input.inv-stock')||'').replace(/[^0-9]/g,''); return v?parseInt(v,10):0; })(),
+                    category: String(val('input.inv-cat')||'').trim()
+                };
+                // Validaciones básicas con feedback visual
+                const mark = (sel) => { const el = tr.querySelector(sel); if (el) { el.style.outline = '2px solid #e74c3c'; el.focus(); } };
+                tr.querySelectorAll('input').forEach(i => { i.style.outline = ''; });
+                if (!payload.name) { mark('input.inv-name'); showNotification('Nombre requerido', 'error'); return; }
+                if (Number.isNaN(payload.price) || payload.price < 0) { mark('input.inv-price'); showNotification('Precio inválido', 'error'); return; }
+                if (Number.isNaN(payload.stock) || payload.stock < 0) { mark('input.inv-stock'); showNotification('Stock inválido', 'error'); return; }
+                const res = await apiInvoke('update-product', payload);
+                if (res && res.success === false) { showNotification('Error al actualizar', 'error'); return; }
+                showNotification('Producto actualizado', 'success');
+                loadInventoryData();
+                return;
             }
-            addBtn.textContent = 'Actualizar';
-            cancelBtn.classList.remove('hidden');
+            // Enter edit mode
+            const tdName = tr.querySelector('td[data-col="name"]');
+            const tdPrice = tr.querySelector('td[data-col="price"]');
+            const tdStock = tr.querySelector('td[data-col="stock"]');
+            const tdCat = tr.querySelector('td[data-col="category"]');
+            tdName.innerHTML = `<input class="inv-name" value="${(prod.name||'').replace(/"/g,'&quot;')}" />`;
+            tdPrice.innerHTML = `<input class="inv-price" type="number" step="1" min="0" value="${Math.round(Number(prod.price)||0)}" style="text-align:right;" />`;
+            tdStock.innerHTML = `<input class="inv-stock" type="number" step="1" min="0" value="${parseInt(prod.stock)||0}" style="text-align:right;" />`;
+            const listId = `inv-cat-list-${id}`;
+            tdCat.innerHTML = `<input class="inv-cat" list="${listId}" value="${(prod.category||'').replace(/"/g,'&quot;')}" /><datalist id="${listId}">${categories.map(c=>`<option value="${c}"></option>`).join('')}</datalist>`;
+            tr.setAttribute('data-editing','1');
+            btn.textContent = 'Guardar';
+            // Add cancel button next to it only if not present
+            if (!tr.querySelector('[data-cancel]')) {
+                const cancel = document.createElement('button'); cancel.className='btn btn-secondary'; cancel.textContent='Cancelar'; cancel.setAttribute('data-cancel', String(id)); cancel.style.marginLeft='8px'; btn.parentElement.appendChild(cancel);
+            }
+            // Key handlers
+            tr.querySelectorAll('input').forEach(inp => {
+                inp.addEventListener('keydown', async (ev) => {
+                    if (ev.key === 'Enter') { btn.click(); }
+                    if (ev.key === 'Escape') { loadInventoryData(); }
+                });
+            });
         } else if (btn.dataset.del) {
             const id = parseInt(btn.dataset.del);
             const prod = products.find(x => x.id === id);
@@ -1067,6 +1276,8 @@ function renderInventory(products) {
             } else {
                 showNotification('Error al eliminar', 'error');
             }
+        } else if (btn.dataset.cancel) {
+            loadInventoryData();
         }
     });
 

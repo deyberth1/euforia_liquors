@@ -3,28 +3,88 @@ const express = require('express');
 const path = require('path');
 const db = require('./database/database');
 const bcrypt = require('bcrypt');
+const http = require('http');
+let helmet, rateLimit;
+try { helmet = require('helmet'); } catch(_) {}
+try { rateLimit = require('express-rate-limit'); } catch(_) {}
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 try { app.use(require('compression')()); } catch (e) { /* optional */ }
+if (helmet) {
+  try { app.use(helmet({ crossOriginResourcePolicy: false })); } catch (_) {}
+}
 
 // Simple CORS for local file:// usage
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, x-location-id');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
+// Location middleware
+app.use((req, res, next) => {
+  const hdr = req.headers['x-location-id'];
+  const loc = parseInt(hdr || '1');
+  req.locationId = Number.isFinite(loc) && loc > 0 ? loc : 1;
+  next();
+});
+
+// DB reliability: wrap db.get/all/run with small retry/backoff for transients
+(function attachDbRetries() {
+  const isTransient = (err) => {
+    const msg = String((err && err.message) || err || '').toLowerCase();
+    return (
+      msg.includes('busy') || msg.includes('locked') ||
+      msg.includes('timeout') || msg.includes('reset') ||
+      msg.includes('temporary') || msg.includes('fetch') || msg.includes('network')
+    );
+  };
+  const wrap = (method) => {
+    const original = db[method] && db[method].bind(db);
+    if (!original) return;
+    db[method] = function(sql, params, cb) {
+      if (typeof params === 'function') { cb = params; params = []; }
+      let attempts = 0;
+      const max = 3;
+      const attempt = () => {
+        attempts++;
+        try {
+          original(sql, params, function(err, result) {
+            if (err && isTransient(err) && attempts < max) {
+              setTimeout(attempt, 100 * attempts);
+              return;
+            }
+            if (cb) cb.apply(this, arguments);
+          });
+        } catch (e) {
+          if (isTransient(e) && attempts < max) {
+            setTimeout(attempt, 100 * attempts);
+          } else {
+            if (cb) cb(e);
+          }
+        }
+      };
+      attempt();
+      return this;
+    };
+  };
+  ['get','all','run'].forEach(wrap);
+})();
+
 // Auth
-app.post('/api/login', (req, res) => {
+const loginHandler = (req, res) => {
   const rawUser = req.body?.username || '';
   const username = String(rawUser).trim().toLowerCase();
   const password = req.body?.password || '';
   const sql = 'SELECT * FROM users WHERE username = ?';
   db.get(sql, [username], (err, user) => {
-    if (err) return res.status(500).json({ success: false, error: 'db' });
+    if (err) {
+      console.error('Login DB error:', err && err.message ? err.message : err);
+      return res.status(500).json({ success: false, error: 'db' });
+    }
     if (!user) return res.json({ success: false, error: 'Invalid credentials' });
     bcrypt.compare(password, user.password, (err, ok) => {
       if (ok) {
@@ -34,6 +94,20 @@ app.post('/api/login', (req, res) => {
         res.json({ success: false, error: 'Invalid credentials' });
       }
     });
+  });
+};
+if (rateLimit) {
+  const limiter = rateLimit({ windowMs: 60 * 1000, max: 15 });
+  app.post('/api/login', limiter, loginHandler);
+} else {
+  app.post('/api/login', loginHandler);
+}
+
+// Simple health endpoint to verify DB connectivity
+app.get('/api/health', (req, res) => {
+  db.get('SELECT COUNT(1) as users FROM users', [], (err, row) => {
+    if (err) return res.status(500).json({ ok: false, error: err.message });
+    res.json({ ok: true, users: row?.users || 0 });
   });
 });
 
@@ -61,8 +135,8 @@ app.get('/api/dashboard/summary', (req, res) => {
 // Products
 app.get('/api/products', (req, res) => {
   const forSale = req.query.forSale === 'true';
-  const sql = forSale ? 'SELECT * FROM products WHERE stock > 0 ORDER BY name' : 'SELECT * FROM products ORDER BY name';
-  db.all(sql, [], (err, rows) => {
+  const sql = forSale ? 'SELECT * FROM products WHERE stock > 0 AND location_id = ? ORDER BY name' : 'SELECT * FROM products WHERE location_id = ? ORDER BY name';
+  db.all(sql, [req.locationId], (err, rows) => {
     if (err) return res.status(500).json([]);
     res.json(rows);
   });
@@ -70,8 +144,8 @@ app.get('/api/products', (req, res) => {
 
 app.post('/api/products', (req, res) => {
   const { name, price, stock, category } = req.body;
-  const sql = 'INSERT INTO products (name, price, stock, category) VALUES (?, ?, ?, ?)';
-  db.run(sql, [name, Math.round(Number(price)||0), parseInt(stock)||0, category], function(err) {
+  const sql = 'INSERT INTO products (name, price, stock, category, location_id) VALUES (?, ?, ?, ?, ?)';
+  db.run(sql, [name, Math.round(Number(price)||0), parseInt(stock)||0, category, req.locationId], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, id: this.lastID });
   });
@@ -80,8 +154,8 @@ app.post('/api/products', (req, res) => {
 app.put('/api/products/:id', (req, res) => {
   const { name, price, stock, category } = req.body;
   const { id } = req.params;
-  const sql = 'UPDATE products SET name = ?, price = ?, stock = ?, category = ? WHERE id = ?';
-  db.run(sql, [name, Math.round(Number(price)||0), parseInt(stock)||0, category, id], function(err) {
+  const sql = 'UPDATE products SET name = ?, price = ?, stock = ?, category = ? WHERE id = ? AND location_id = ?';
+  db.run(sql, [name, Math.round(Number(price)||0), parseInt(stock)||0, category, id, req.locationId], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, changes: this.changes });
   });
@@ -89,8 +163,8 @@ app.put('/api/products/:id', (req, res) => {
 
 app.delete('/api/products/:id', (req, res) => {
   const { id } = req.params;
-  const sql = 'DELETE FROM products WHERE id = ?';
-  db.run(sql, id, function(err) {
+  const sql = 'DELETE FROM products WHERE id = ? AND location_id = ?';
+  db.run(sql, [id, req.locationId], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, changes: this.changes });
   });
@@ -109,6 +183,7 @@ app.get('/api/tables', (req, res) => {
       FROM sales s JOIN sale_items si ON s.id = si.sale_id
       WHERE s.status = 'pending' GROUP BY s.table_id
     ) si ON t.id = si.table_id
+    WHERE t.location_id = ?
     ORDER BY
       CASE
         WHEN t.name LIKE 'Mesa %' THEN 0
@@ -118,15 +193,15 @@ app.get('/api/tables', (req, res) => {
       CASE WHEN t.name LIKE 'Mesa %' THEN CAST(SUBSTR(t.name, 6) AS INTEGER) END,
       CASE WHEN t.name LIKE 'Barra %' THEN CAST(SUBSTR(t.name, 7) AS INTEGER) END,
       t.name`;
-  db.all(sql, [], (err, rows) => {
+  db.all(sql, [req.locationId], (err, rows) => {
     if (err) return res.status(500).json([]);
     res.json(rows);
   });
 });
 
 app.get('/api/tables/free', (req, res) => {
-  const sql = "SELECT * FROM tables WHERE status = 'free' ORDER BY name";
-  db.all(sql, [], (err, rows) => {
+  const sql = "SELECT * FROM tables WHERE status = 'free' AND location_id = ? ORDER BY name";
+  db.all(sql, [req.locationId], (err, rows) => {
     if (err) return res.status(500).json([]);
     res.json(rows);
   });
@@ -134,32 +209,47 @@ app.get('/api/tables/free', (req, res) => {
 
 // Tables CRUD
 app.post('/api/tables', (req, res) => {
-  const { name, type = 'table', capacity = 4 } = req.body;
-  if (!name) return res.status(400).json({ success: false, error: 'Nombre requerido' });
-  const sql = 'INSERT INTO tables (name, type, capacity) VALUES (?, ?, ?)';
-  db.run(sql, [name, type, parseInt(capacity)||4], function(err) {
-    if (err) return res.status(500).json({ success: false, error: err.message });
+  const rawName = String(req.body?.name || '').trim();
+  const type = String(req.body?.type || 'table');
+  const capacity = parseInt(req.body?.capacity) || 4;
+  if (!rawName) return res.status(400).json({ success: false, error: 'Nombre requerido' });
+  const sql = 'INSERT INTO tables (name, type, capacity, location_id) VALUES (?, ?, ?, ?)';
+  db.run(sql, [rawName, type, capacity, req.locationId], function(err) {
+    if (err) {
+      if (String(err.message||'').includes('UNIQUE constraint failed')) {
+        return res.status(400).json({ success: false, error: 'Ya existe una mesa con ese nombre' });
+      }
+      return res.status(500).json({ success: false, error: err.message });
+    }
     res.json({ success: true, id: this.lastID });
   });
 });
 
 app.put('/api/tables/:id', (req, res) => {
   const { id } = req.params;
-  const { name, type = 'table', capacity = 4, status } = req.body;
+  const name = String(req.body?.name||'').trim();
+  const type = String(req.body?.type || 'table');
+  const capacity = parseInt(req.body?.capacity) || 4;
+  const status = req.body?.status;
   const fields = ['name = ?', 'type = ?', 'capacity = ?'];
   const params = [name, type, parseInt(capacity)||4];
   if (status) { fields.push('status = ?'); params.push(status); }
-  params.push(id);
-  const sql = `UPDATE tables SET ${fields.join(', ')}, created_at = created_at WHERE id = ?`;
+  params.push(id, req.locationId);
+  const sql = `UPDATE tables SET ${fields.join(', ')}, created_at = created_at WHERE id = ? AND location_id = ?`;
   db.run(sql, params, function(err) {
-    if (err) return res.status(500).json({ success: false, error: err.message });
+    if (err) {
+      if (String(err.message||'').includes('UNIQUE constraint failed')) {
+        return res.status(400).json({ success: false, error: 'Ya existe una mesa con ese nombre' });
+      }
+      return res.status(500).json({ success: false, error: err.message });
+    }
     res.json({ success: true, changes: this.changes });
   });
 });
 
 app.delete('/api/tables/:id', (req, res) => {
   const { id } = req.params;
-  db.run('DELETE FROM tables WHERE id = ?', [id], function(err) {
+  db.run('DELETE FROM tables WHERE id = ? AND location_id = ?', [id, req.locationId], function(err) {
     if (err) return res.status(500).json({ success: false, error: err.message });
     res.json({ success: true, changes: this.changes });
   });
@@ -182,24 +272,51 @@ app.get('/api/tables/:id/order', (req, res) => {
 // Sales
 app.post('/api/sales/process', (req, res) => {
   const saleData = req.body;
+  const idemKey = String(saleData.idempotency_key || '')
+    .replace(/[^a-zA-Z0-9_-]/g,'')
+    .slice(0,64);
   db.serialize(() => {
     db.run('BEGIN TRANSACTION;');
-    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`;
+    if (idemKey) {
+      // Prevent duplicate processing
+      db.get('SELECT id FROM transactions WHERE description = ? AND location_id = ?', [ `Idem:${idemKey}`, req.locationId ], (err, row) => {
+        if (row) { db.run('ROLLBACK;'); return res.json({ success:true, duplicate:true }); }
+      });
+    }
+    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, location_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`;
     const tableId = saleData.tableId;
     const saleType = tableId ? 'table' : 'direct';
     const payment = saleData.payment_method || 'cash';
     const status = 'paid';
 
     const proceedWithInsert = () => {
-      db.run(saleSql, [1, tableId, Math.round(Number(saleData.total)||0), saleType, payment, status], function(err) {
+      const items = Array.isArray(saleData.items) ? saleData.items : [];
+      const tableId = saleData.tableId;
+      // If trying to process with no items: for table → free it; for direct → reject
+      if (items.length === 0) {
+        if (tableId) {
+          db.run(`UPDATE tables SET status = 'free' WHERE id = ?`, [tableId], (err) => {
+            if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+            db.run('COMMIT;', (err) => {
+              if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+              return res.json({ success: true, cleared: true });
+            });
+          });
+        } else {
+          db.run('ROLLBACK;');
+          return res.status(400).json({ success: false, error: 'No hay items' });
+        }
+        return;
+      }
+      db.run(saleSql, [1, tableId, Math.round(Number(saleData.total)||0), saleType, payment, status, req.locationId], function(err) {
         if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
         const saleId = this.lastID;
         const itemsSql = `INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`;
         const stockSql = `UPDATE products SET stock = stock - ? WHERE id = ?`;
 
         let itemsProcessed = 0;
-        const totalItems = saleData.items.length;
-        saleData.items.forEach(item => {
+        const totalItems = items.length;
+        items.forEach(item => {
           db.run(itemsSql, [saleId, item.id, item.quantity, item.price], (err) => {
             if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
           });
@@ -207,8 +324,9 @@ app.post('/api/sales/process', (req, res) => {
             if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
             itemsProcessed++;
             if (itemsProcessed === totalItems) {
-              const transSql = `INSERT INTO transactions (type, amount, description, payment_method, created_by) VALUES ('income', ?, ?, ?, ?)`;
-              db.run(transSql, [Math.round(Number(saleData.total)||0), `Venta ID: ${saleId}`, payment, 1], (err) => {
+              const transSql = `INSERT INTO transactions (type, amount, description, payment_method, created_by, location_id) VALUES ('income', ?, ?, ?, ?, ?)`;
+              const desc = idemKey ? `Idem:${idemKey}` : `Venta ID: ${saleId}`;
+              db.run(transSql, [Math.round(Number(saleData.total)||0), desc, payment, 1, req.locationId], (err) => {
                 if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
                 if (tableId) {
                   db.run(`UPDATE tables SET status = 'free' WHERE id = ?`, [tableId], (err) => {
@@ -247,41 +365,96 @@ app.post('/api/sales/process', (req, res) => {
 
 app.post('/api/sales/save', (req, res) => {
   const orderData = req.body;
+  try { console.log('[save-order] payload:', JSON.stringify(orderData)); } catch(_) {}
   db.serialize(() => {
     db.run('BEGIN TRANSACTION;');
-    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`;
+    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, location_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`;
     const tableId = orderData.tableId;
     const saleType = tableId ? 'table' : 'direct';
     const payment = orderData.payment_method || 'cash';
     const status = 'pending';
-    const total = orderData.items.reduce((sum, item) => sum + (Math.round(Number(item.price)||0) * item.quantity), 0);
-    db.run(saleSql, [1, tableId, Math.round(Number(total)||0), saleType, payment, status], function(err) {
-      if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
-      const saleId = this.lastID;
-      const itemsSql = `INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`;
-      let itemsProcessed = 0;
-      const totalItems = orderData.items.length;
-      orderData.items.forEach(item => {
-        db.run(itemsSql, [saleId, item.id, item.quantity, item.price], (err) => {
-          if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
-          itemsProcessed++;
-          if (itemsProcessed === totalItems) {
-            const finalize = () => db.run('COMMIT;', (err) => {
+    const rawItems = Array.isArray(orderData.items) ? orderData.items : [];
+    const items = rawItems.map(it => ({ id: parseInt(it.id)||0, quantity: parseInt(it.quantity)||0, price: Math.round(Number(it.price)||0) }))
+      .filter(it => it.id > 0 && it.quantity > 0);
+    const total = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+    const insertNewPending = () => {
+      db.run(saleSql, [1, tableId, Math.round(Number(total)||0), saleType, payment, status, req.locationId], function(err) {
+        if (err) { try { console.error('[save-order] insert sale error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+        const saleId = this.lastID;
+        const itemsSql = `INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`;
+        let itemsProcessed = 0;
+        const totalItems = items.length;
+        if (totalItems === 0) {
+          // No items → just free the table if any, and commit
+          if (tableId) {
+            db.run(`UPDATE tables SET status = 'free' WHERE id = ?`, [tableId], (err) => {
               if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
-              res.json({ success: true, saleId });
-            });
-            if (tableId) {
-              db.run(`UPDATE tables SET status = 'occupied' WHERE id = ?`, [tableId], (err) => {
+              db.run('COMMIT;', (err) => {
                 if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
-                finalize();
+                res.json({ success: true, cleared: true });
               });
-            } else {
-              finalize();
+            });
+          } else {
+            db.run('COMMIT;', (err) => {
+              if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+              res.json({ success: true, cleared: true });
+            });
+          }
+          return;
+        }
+        items.forEach(item => {
+          db.run(itemsSql, [saleId, item.id, item.quantity, item.price], (err) => {
+            if (err) { try { console.error('[save-order] insert item error:', err, { saleId, item }); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+            itemsProcessed++;
+            if (itemsProcessed === totalItems) {
+              const finalize = () => db.run('COMMIT;', (err) => {
+                if (err) { try { console.error('[save-order] commit error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+                res.json({ success: true, saleId });
+              });
+              if (tableId) {
+                db.run(`UPDATE tables SET status = 'occupied' WHERE id = ?`, [tableId], (err) => {
+                  if (err) { try { console.error('[save-order] update table error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+                  finalize();
+                });
+              } else {
+                finalize();
+              }
             }
+          });
+        });
+      });
+    };
+
+    if (tableId) {
+      // Replace existing pending order for the table
+      db.run(`DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE table_id = ? AND status = 'pending')`, [tableId], (err) => {
+        if (err) { try { console.error('[save-order] delete old items error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+        db.run(`DELETE FROM sales WHERE table_id = ? AND status = 'pending'`, [tableId], (err) => {
+          if (err) { try { console.error('[save-order] delete old sales error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+          if (items.length === 0 || Math.round(Number(total)||0) <= 0) {
+            // No items → simply free the table and commit
+            db.run(`UPDATE tables SET status = 'free' WHERE id = ?`, [tableId], (err) => {
+              if (err) { try { console.error('[save-order] free table error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+              db.run('COMMIT;', (err) => {
+                if (err) { try { console.error('[save-order] commit clear error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+                res.json({ success: true, cleared: true });
+              });
+            });
+          } else {
+            insertNewPending();
           }
         });
       });
-    });
+    } else {
+      // Direct sale save without table: require items
+      if (items.length === 0 || Math.round(Number(total)||0) <= 0) {
+        try { console.warn('[save-order] direct save with no items'); } catch(_) {}
+        db.run('ROLLBACK;');
+        return res.status(400).json({ success: false, error: 'Sin items' });
+      }
+      insertNewPending();
+    }
   });
 });
 
@@ -515,8 +688,23 @@ app.post('/api/schedules', (req, res) => {
 
 // Users API
 app.get('/api/users', (req, res) => {
-  const sql = 'SELECT id, username, role, full_name, email, phone, is_active, created_at, last_login FROM users ORDER BY created_at DESC';
-  db.all(sql, [], (err, rows) => {
+  // Super admin ve todos, otros solo los de su sede
+  const base = 'SELECT id, username, role, full_name, email, phone, is_active, created_at, last_login FROM users';
+  const sql = 'super' // placeholder to build dynamic
+  const isSuper = String(req.headers['x-user-role']||'').toLowerCase() === 'super_admin';
+  const query = isSuper
+    ? `${base} ORDER BY created_at DESC`
+    : `${base} WHERE id IN (SELECT user_id FROM user_locations WHERE location_id = ?) ORDER BY created_at DESC`;
+  const params = isSuper ? [] : [req.locationId];
+  db.all(query, params, (err, rows) => {
+    if (err) return res.status(500).json([]);
+    res.json(rows);
+  });
+});
+
+// Locations API
+app.get('/api/locations', (req, res) => {
+  db.all('SELECT id, name, is_active FROM locations ORDER BY name', [], (err, rows) => {
     if (err) return res.status(500).json([]);
     res.json(rows);
   });
@@ -545,7 +733,12 @@ app.post('/api/users', (req, res) => {
         }
         return res.status(500).json({ success: false, error: err.message });
       }
-      res.json({ success: true, id: this.lastID });
+      const newId = this.lastID;
+      // Map user to current location unless super admin (who will be global)
+      if ((role || 'employee') !== 'super_admin') {
+        db.run('INSERT OR IGNORE INTO user_locations (user_id, location_id, role) VALUES (?, ?, ?)', [newId, req.locationId, role || 'employee']);
+      }
+      res.json({ success: true, id: newId });
     });
   });
 });
@@ -599,6 +792,10 @@ app.put('/api/users/:id', (req, res) => {
           }
           return res.status(500).json({ success: false, error: err.message });
         }
+        // update mapping for non-super users in current location
+        if (role !== 'super_admin') {
+          db.run('INSERT OR IGNORE INTO user_locations (user_id, location_id, role) VALUES (?, ?, ?)', [id, req.locationId, role]);
+        }
         res.json({ success: true, changes: this.changes });
       });
     });
@@ -611,6 +808,9 @@ app.put('/api/users/:id', (req, res) => {
           return res.status(400).json({ success: false, error: 'Username already exists' });
         }
         return res.status(500).json({ success: false, error: err.message });
+      }
+      if (role !== 'super_admin') {
+        db.run('INSERT OR IGNORE INTO user_locations (user_id, location_id, role) VALUES (?, ?, ?)', [id, req.locationId, role]);
       }
       res.json({ success: true, changes: this.changes });
     });
@@ -699,3 +899,19 @@ app.listen(PORT, () => {
 });
 
 
+// Warm-up pings (keep the app/DB awake periodically)
+try {
+  setInterval(() => {
+    http.get(`http://localhost:${PORT}/api/health`).on('error', () => {});
+  }, 5 * 60 * 1000); // cada 5 minutos
+} catch (_) {}
+
+// Global error handler
+app.use((err, req, res, next) => {
+  try { console.error('Unhandled error:', err && err.stack ? err.stack : err); } catch(_) {}
+  res.status(500).json({ success:false, error:'internal' });
+});
+
+// Process-level guards
+process.on('uncaughtException', (e) => { try { console.error('uncaughtException:', e); } catch(_) {} });
+process.on('unhandledRejection', (e) => { try { console.error('unhandledRejection:', e); } catch(_) {} });

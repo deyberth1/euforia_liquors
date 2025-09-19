@@ -27,6 +27,15 @@ if (useTurso) {
     db = {
         run(sql, params, cb) {
             if (typeof params === 'function') { cb = params; params = []; }
+            // Ignore transaction control statements; http client sessions
+            // don't keep a persistent txn context across calls.
+            try {
+                const norm = String(sql || '').trim().toUpperCase();
+                if (norm === 'BEGIN' || norm === 'BEGIN TRANSACTION;' || norm === 'BEGIN TRANSACTION' || norm === 'COMMIT' || norm === 'COMMIT;' || norm === 'ROLLBACK' || norm === 'ROLLBACK;') {
+                    if (cb) cb.call({ lastID: undefined, changes: undefined }, null);
+                    return this;
+                }
+            } catch (_) {}
             schedule(sql, params).then((res) => {
                 const ctx = {
                     lastID: res?.lastInsertRowid ? Number(res.lastInsertRowid) : undefined,
@@ -82,6 +91,45 @@ if (useTurso) {
 
 // Initialize database tables
 db.serialize(() => {
+    // Helper: add column if not exists (SQLite)
+    function addColumnIfNotExists(table, column, ddl) {
+        try {
+            db.all(`PRAGMA table_info(${table})`, [], (e, cols) => {
+                if (e) { return; }
+                const exists = Array.isArray(cols) && cols.some(c => String(c.name||'') === column);
+                if (!exists) {
+                    db.run(`ALTER TABLE ${table} ADD COLUMN ${ddl}`, (err) => {
+                        if (err && !/duplicate column/i.test(String(err.message||''))) {
+                            console.error(`Error adding ${table}.${column}:`, err.message);
+                        }
+                    });
+                }
+            });
+        } catch (_) { /* ignore */ }
+    }
+    // Locations (multi-tenant)
+    db.run(`CREATE TABLE IF NOT EXISTS locations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        is_active BOOLEAN DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // Ensure default locations
+    db.get('SELECT COUNT(1) as cnt FROM locations', [], (err, row) => {
+        const count = row?.cnt || 0;
+        if (!err && count === 0) {
+            db.run('INSERT INTO locations (name) VALUES (?)', ['Euforia Liquors']);
+        }
+        if (!err && count < 2) {
+            // Add Euforia Drinks if not present
+            db.get('SELECT id FROM locations WHERE name = ?', ['Euforia Drinks'], (e2, r2) => {
+                if (!e2 && !r2) {
+                    db.run('INSERT INTO locations (name) VALUES (?)', ['Euforia Drinks']);
+                }
+            });
+        }
+    });
     // SQLite pragmas para modo sqlite local; en Turso se omiten
     if (!useTurso) {
         try { db.run("PRAGMA journal_mode = WAL"); } catch (e) {}
@@ -144,8 +192,10 @@ db.serialize(() => {
         price REAL NOT NULL,
         stock INTEGER DEFAULT 0,
         category TEXT DEFAULT 'general',
+        location_id INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
+    addColumnIfNotExists('products', 'location_id', 'location_id INTEGER DEFAULT 1');
 
     // Tables table
     db.run(`CREATE TABLE IF NOT EXISTS tables (
@@ -154,8 +204,10 @@ db.serialize(() => {
         type TEXT DEFAULT 'table',
         capacity INTEGER DEFAULT 4,
         status TEXT DEFAULT 'free',
+        location_id INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
+    addColumnIfNotExists('tables', 'location_id', 'location_id INTEGER DEFAULT 1');
 
     // Migrate tables extra columns if missing (solo sqlite local)
     if (!useTurso) {
@@ -180,10 +232,12 @@ db.serialize(() => {
         sale_type TEXT DEFAULT 'direct',
         payment_method TEXT DEFAULT 'cash',
         status TEXT DEFAULT 'pending',
+        location_id INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id),
         FOREIGN KEY (table_id) REFERENCES tables (id)
     )`);
+    addColumnIfNotExists('sales', 'location_id', 'location_id INTEGER DEFAULT 1');
 
     // Migrate sales.payment_method if missing (solo sqlite local)
     if (!useTurso) {
@@ -213,8 +267,10 @@ db.serialize(() => {
         description TEXT,
         payment_method TEXT,
         created_by INTEGER,
+        location_id INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
+    addColumnIfNotExists('transactions', 'location_id', 'location_id INTEGER DEFAULT 1');
 
     // Migrate transactions extra columns if missing (solo sqlite local)
     if (!useTurso) {
@@ -237,9 +293,11 @@ db.serialize(() => {
         work_date DATE NOT NULL,
         start_time TIME NOT NULL,
         end_time TIME NOT NULL,
+        location_id INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id)
     )`);
+    addColumnIfNotExists('schedules', 'location_id', 'location_id INTEGER DEFAULT 1');
 
     // Cash sessions table
     db.run(`CREATE TABLE IF NOT EXISTS cash_sessions (
@@ -251,14 +309,18 @@ db.serialize(() => {
         opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         closed_at DATETIME,
         closed_by INTEGER,
+        location_id INTEGER DEFAULT 1,
         FOREIGN KEY (opened_by) REFERENCES users (id),
         FOREIGN KEY (closed_by) REFERENCES users (id)
     )`);
+    addColumnIfNotExists('cash_sessions', 'location_id', 'location_id INTEGER DEFAULT 1');
 
     // Insert default admin user if not exists
     db.get("SELECT COUNT(*) as count FROM users WHERE username = 'deyberth20'", (err, row) => {
         if (err) {
-            console.error('Error checking admin user:', err.message);
+            if (!/duplicate column/i.test(String(err.message||''))) {
+                console.error('Error checking admin user:', err.message);
+            }
         } else if (row.count === 0) {
             const bcrypt = require('bcrypt');
             const saltRounds = 10;
@@ -291,10 +353,23 @@ db.serialize(() => {
         }
     });
 
+    // User to Location mapping (per-sede roles)
+    db.run(`CREATE TABLE IF NOT EXISTS user_locations (
+        user_id INTEGER NOT NULL,
+        location_id INTEGER NOT NULL,
+        role TEXT,
+        PRIMARY KEY(user_id, location_id),
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        FOREIGN KEY (location_id) REFERENCES locations (id)
+    )`);
+    db.run("CREATE INDEX IF NOT EXISTS idx_user_locations_loc ON user_locations(location_id)");
+
     // Insert some sample products if not exists
     db.get("SELECT COUNT(*) as count FROM products", (err, row) => {
         if (err) {
-            console.error('Error checking products:', err.message);
+            if (!/duplicate column/i.test(String(err.message||''))) {
+                console.error('Error checking products:', err.message);
+            }
         } else if (row.count === 0) {
             const sampleProducts = [
                 ['Cerveza Nacional', 8000, 50, 'bebidas'],
@@ -323,11 +398,17 @@ db.serialize(() => {
     db.run("CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at)");
     db.run("CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type)");
     db.run("CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location_id)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_tables_location ON tables(location_id)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_sales_location ON sales(location_id)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_transactions_location ON transactions(location_id)");
 
     // Insert some sample tables if not exists
     db.get("SELECT COUNT(*) as count FROM tables", (err, row) => {
         if (err) {
-            console.error('Error checking tables:', err.message);
+            if (!/duplicate column/i.test(String(err.message||''))) {
+                console.error('Error checking tables:', err.message);
+            }
         } else if (row.count === 0) {
             const sampleTables = [
                 { name: 'Mesa 1', type: 'table', capacity: 4 },
