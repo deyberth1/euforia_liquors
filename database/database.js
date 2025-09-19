@@ -232,12 +232,14 @@ db.serialize(() => {
         sale_type TEXT DEFAULT 'direct',
         payment_method TEXT DEFAULT 'cash',
         status TEXT DEFAULT 'pending',
+        idempotency_key TEXT,
         location_id INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id),
         FOREIGN KEY (table_id) REFERENCES tables (id)
     )`);
     addColumnIfNotExists('sales', 'location_id', 'location_id INTEGER DEFAULT 1');
+    addColumnIfNotExists('sales', 'idempotency_key', 'idempotency_key TEXT');
 
     // Migrate sales.payment_method if missing (solo sqlite local)
     if (!useTurso) {

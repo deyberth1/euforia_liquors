@@ -278,12 +278,12 @@ app.post('/api/sales/process', (req, res) => {
   db.serialize(() => {
     db.run('BEGIN TRANSACTION;');
     if (idemKey) {
-      // Prevent duplicate processing
-      db.get('SELECT id FROM transactions WHERE description = ? AND location_id = ?', [ `Idem:${idemKey}`, req.locationId ], (err, row) => {
+      // Prevent duplicate processing using sales.idempotency_key
+      db.get('SELECT id FROM sales WHERE idempotency_key = ? AND location_id = ?', [ idemKey, req.locationId ], (err, row) => {
         if (row) { db.run('ROLLBACK;'); return res.json({ success:true, duplicate:true }); }
       });
     }
-    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, location_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`;
+    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, idempotency_key, location_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`;
     const tableId = saleData.tableId;
     const saleType = tableId ? 'table' : 'direct';
     const payment = saleData.payment_method || 'cash';
@@ -308,7 +308,7 @@ app.post('/api/sales/process', (req, res) => {
         }
         return;
       }
-      db.run(saleSql, [1, tableId, Math.round(Number(saleData.total)||0), saleType, payment, status, req.locationId], function(err) {
+      db.run(saleSql, [1, tableId, Math.round(Number(saleData.total)||0), saleType, payment, status, idemKey || null, req.locationId], function(err) {
         if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
         const saleId = this.lastID;
         const itemsSql = `INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`;
@@ -325,24 +325,31 @@ app.post('/api/sales/process', (req, res) => {
             itemsProcessed++;
             if (itemsProcessed === totalItems) {
               const transSql = `INSERT INTO transactions (type, amount, description, payment_method, created_by, location_id) VALUES ('income', ?, ?, ?, ?, ?)`;
-              const desc = idemKey ? `Idem:${idemKey}` : `Venta ID: ${saleId}`;
-              db.run(transSql, [Math.round(Number(saleData.total)||0), desc, payment, 1, req.locationId], (err) => {
+              const amountToInsert = Math.round(Number(saleData.total)||0);
+              const insertTx = (desc) => db.run(transSql, [amountToInsert, desc, payment, 1, req.locationId], (err) => {
                 if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+                const finalizeCommit = () => db.run('COMMIT;', (err) => {
+                  if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
+                  res.json({ success: true, saleId });
+                });
                 if (tableId) {
                   db.run(`UPDATE tables SET status = 'free' WHERE id = ?`, [tableId], (err) => {
                     if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
-                    db.run('COMMIT;', (err) => {
-                      if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
-                      res.json({ success: true, saleId });
-                    });
+                    finalizeCommit();
                   });
                 } else {
-                  db.run('COMMIT;', (err) => {
-                    if (err) { db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
-                    res.json({ success: true, saleId });
-                  });
+                  finalizeCommit();
                 }
               });
+
+              if (saleType === 'table' && tableId) {
+                db.get('SELECT name FROM tables WHERE id = ?', [tableId], (e2, row) => {
+                  const tableName = row?.name ? String(row.name) : `Mesa ${tableId}`;
+                  insertTx(`Venta de mesa — ${tableName}`);
+                });
+              } else {
+                insertTx('Venta directa');
+              }
             }
           });
         });
@@ -368,7 +375,7 @@ app.post('/api/sales/save', (req, res) => {
   try { console.log('[save-order] payload:', JSON.stringify(orderData)); } catch(_) {}
   db.serialize(() => {
     db.run('BEGIN TRANSACTION;');
-    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, location_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`;
+    const saleSql = `INSERT INTO sales (user_id, table_id, total, sale_type, payment_method, status, idempotency_key, location_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`;
     const tableId = orderData.tableId;
     const saleType = tableId ? 'table' : 'direct';
     const payment = orderData.payment_method || 'cash';
@@ -379,7 +386,7 @@ app.post('/api/sales/save', (req, res) => {
     const total = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
     const insertNewPending = () => {
-      db.run(saleSql, [1, tableId, Math.round(Number(total)||0), saleType, payment, status, req.locationId], function(err) {
+      db.run(saleSql, [1, tableId, Math.round(Number(total)||0), saleType, payment, status, null, req.locationId], function(err) {
         if (err) { try { console.error('[save-order] insert sale error:', err); } catch(_) {} db.run('ROLLBACK;'); return res.status(500).json({ success: false, error: err.message }); }
         const saleId = this.lastID;
         const itemsSql = `INSERT INTO sale_items (sale_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`;

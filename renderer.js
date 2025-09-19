@@ -86,6 +86,7 @@ function toQuery(obj) {
 async function get(pathname) {
     const headers = {};
     try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
+    try { if (currentUser && currentUser.role) headers['x-user-role'] = currentUser.role; } catch(_) {}
     const res = await fetch(`${API_BASE}${pathname}`, { cache: 'no-store', headers });
     if (!res.ok) {
         let msg = 'network';
@@ -97,6 +98,7 @@ async function get(pathname) {
 async function post(pathname, body) {
     const headers = { 'Content-Type': 'application/json' };
     try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
+    try { if (currentUser && currentUser.role) headers['x-user-role'] = currentUser.role; } catch(_) {}
     const doFetch = async () => {
         const res = await fetch(`${API_BASE}${pathname}`, {
             method: 'POST',
@@ -120,6 +122,7 @@ async function post(pathname, body) {
 async function put(pathname, body) {
     const headers = { 'Content-Type': 'application/json' };
     try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
+    try { if (currentUser && currentUser.role) headers['x-user-role'] = currentUser.role; } catch(_) {}
     const res = await fetch(`${API_BASE}${pathname}`, {
         method: 'PUT',
         headers,
@@ -136,6 +139,7 @@ async function put(pathname, body) {
 async function del(pathname) {
     const headers = {};
     try { const loc = localStorage.getItem('activeLocationId'); if (loc) headers['x-location-id'] = loc; } catch(_) {}
+    try { if (currentUser && currentUser.role) headers['x-user-role'] = currentUser.role; } catch(_) {}
     const res = await fetch(`${API_BASE}${pathname}`, { method: 'DELETE', cache: 'no-store', headers });
     if (!res.ok) {
         let msg = 'network';
