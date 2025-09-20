@@ -355,6 +355,23 @@ async function loadDashboardData() {
                 closeBtn._bound = true;
             }
             updateCashStatusOnDashboard();
+            // Render turn summary
+            try {
+                const turn = await getTurnSummary();
+                const panel = dashModule.querySelector('#turn-summary');
+                if (panel && turn && turn.hasOpen) {
+                    panel.innerHTML = `
+                        <div>Ventas: <strong style="color:#d4af37;">${formatCurrency(turn.sales||0)}</strong></div>
+                        <div>Otros ingresos: <strong style="color:#27ae60;">${formatCurrency(turn.otherIncome||0)}</strong></div>
+                        <div>Gastos: <strong style="color:#e74c3c;">${formatCurrency(turn.expense||0)}</strong></div>
+                        <div>Efectivo (ing): <strong style="color:#27ae60;">${formatCurrency(turn.incomeCash||0)}</strong></div>
+                        <div>Transferencias (ing): <strong style="color:#27ae60;">${formatCurrency(turn.incomeTransfer||0)}</strong></div>
+                        <div>Sugerido cierre (efectivo): <strong style="color:#27ae60;">${formatCurrency(turn.suggestedClose||0)}</strong></div>
+                    `;
+                } else if (panel) {
+                    panel.innerHTML = '<div>No hay caja abierta.</div>';
+                }
+            } catch (_) {}
         }
     } catch (error) {
         console.error('Error loading dashboard data:', error);
@@ -387,6 +404,14 @@ function updateDashboardTables(tablesData) {
 async function getCashSummary() {
     try {
         const res = await fetch(`${API_BASE}/cash/summary`, { cache: 'no-store' });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (_) { return null; }
+}
+
+async function getTurnSummary() {
+    try {
+        const res = await fetch(`${API_BASE}/cash/turn-summary`, { cache: 'no-store' });
         if (!res.ok) return null;
         return await res.json();
     } catch (_) { return null; }

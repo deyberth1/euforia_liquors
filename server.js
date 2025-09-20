@@ -610,6 +610,61 @@ app.get('/api/cash/summary', (req, res) => {
   });
 });
 
+// Turn summary (since a cash session opened_at)
+app.get('/api/cash/turn-summary', (req, res) => {
+  const sessionParam = req.query.session; // 'open' or undefined
+  const sessionId = req.query.id ? parseInt(req.query.id) : null;
+  const findSql = sessionId
+    ? "SELECT id, opening_balance, opened_at FROM cash_sessions WHERE id = ?"
+    : "SELECT id, opening_balance, opened_at FROM cash_sessions WHERE status = 'open' ORDER BY opened_at DESC LIMIT 1";
+  const params = sessionId ? [sessionId] : [];
+  db.get(findSql, params, (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) return res.json({ hasOpen: false });
+    const opening = Number(row.opening_balance || 0);
+    const since = row.opened_at;
+    const q = "SELECT type, payment_method, amount FROM transactions WHERE datetime(created_at) >= datetime(?)";
+    db.all(q, [since], (e2, txs) => {
+      if (e2) return res.status(500).json({ error: e2.message });
+      const sum = (f) => txs.filter(f).reduce((s, r) => s + Number(r.amount || 0), 0);
+      const income = sum(r => r.type === 'income');
+      const incomeCash = sum(r => r.type === 'income' && r.payment_method === 'cash');
+      const incomeTransfer = sum(r => r.type === 'income' && r.payment_method === 'transfer');
+      const expense = sum(r => r.type === 'expense');
+      const expenseCash = sum(r => r.type === 'expense' && r.payment_method === 'cash');
+      // Sales from sales table during turn (paid)
+      db.get("SELECT COALESCE(SUM(total),0) as sales FROM sales WHERE datetime(created_at) >= datetime(?) AND status = 'paid'", [since], (e3, s1) => {
+        const salesTotal = e3 ? 0 : (s1?.sales || 0);
+        db.get("SELECT COALESCE(SUM(total),0) as salesCash FROM sales WHERE datetime(created_at) >= datetime(?) AND status = 'paid' AND payment_method = 'cash'", [since], (e4, sc) => {
+          const salesCash = e4 ? 0 : (sc?.salesCash || 0);
+          db.get("SELECT COALESCE(SUM(total),0) as salesTransfer FROM sales WHERE datetime(created_at) >= datetime(?) AND status = 'paid' AND payment_method = 'transfer'", [since], (e5, st) => {
+            const salesTransfer = e5 ? 0 : (st?.salesTransfer || 0);
+            const otherIncome = Math.max(0, income - salesTotal);
+            const suggestedClose = opening + incomeCash - expenseCash;
+            res.json({
+        hasOpen: true,
+        sessionId: row.id,
+        opening,
+        since,
+        income,
+        incomeCash,
+        incomeTransfer,
+        expense,
+        expenseCash,
+        sales: salesTotal,
+        salesCash,
+        salesTransfer,
+        otherIncome,
+        balance: income - expense,
+        suggestedClose
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
 app.post('/api/transactions/income', (req, res) => {
   const { description, amount, user_id, payment_method } = req.body;
   const pay = payment_method === 'transfer' ? 'transfer' : 'cash';
