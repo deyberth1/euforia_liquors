@@ -756,14 +756,14 @@ app.post('/api/schedules', (req, res) => {
 
 // Users API
 app.get('/api/users', (req, res) => {
-  // Super admin ve todos, otros solo los de su sede
+  // Por defecto filtra por sede actual. Super admin puede ver todos con ?all=true
   const base = 'SELECT id, username, role, full_name, email, phone, is_active, created_at, last_login FROM users';
-  const sql = 'super' // placeholder to build dynamic
   const isSuper = String(req.headers['x-user-role']||'').toLowerCase() === 'super_admin';
-  const query = isSuper
+  const showAll = isSuper && String(req.query.all||'').toLowerCase() === 'true';
+  const query = showAll
     ? `${base} ORDER BY created_at DESC`
     : `${base} WHERE id IN (SELECT user_id FROM user_locations WHERE location_id = ?) ORDER BY created_at DESC`;
-  const params = isSuper ? [] : [req.locationId];
+  const params = showAll ? [] : [req.locationId];
   db.all(query, params, (err, rows) => {
     if (err) return res.status(500).json([]);
     res.json(rows);
@@ -807,6 +807,137 @@ app.post('/api/users', (req, res) => {
         db.run('INSERT OR IGNORE INTO user_locations (user_id, location_id, role) VALUES (?, ?, ?)', [newId, req.locationId, role || 'employee']);
       }
       res.json({ success: true, id: newId });
+    });
+  });
+});
+
+// Migración: copiar productos y mesas entre sedes (solo super_admin)
+app.post('/api/migrate/copy-location-data', (req, res) => {
+  const isSuper = String(req.headers['x-user-role']||'').toLowerCase() === 'super_admin';
+  if (!isSuper) return res.status(403).json({ success:false, error:'Forbidden' });
+
+  const fromId = parseInt(req.body?.from);
+  const toId = parseInt(req.body?.to);
+  const includeProducts = req.body?.includeProducts !== false; // default true
+  const includeTables = req.body?.includeTables !== false; // default true
+  const copyStock = req.body?.copyStock === true; // default false → stock 0
+  const overwrite = req.body?.overwrite === true; // default false
+
+  if (!fromId || !toId || fromId === toId) {
+    return res.status(400).json({ success:false, error:'Parámetros from/to inválidos' });
+  }
+
+  db.serialize(() => {
+    db.run('BEGIN TRANSACTION;');
+
+    const results = { productsInserted: 0, productsUpdated: 0, tablesInserted: 0 };
+
+    const finalize = (err) => {
+      if (err) {
+        db.run('ROLLBACK;');
+        return res.status(500).json({ success:false, error: err.message });
+      }
+      db.run('COMMIT;', (e2) => {
+        if (e2) return res.status(500).json({ success:false, error: e2.message });
+        res.json({ success:true, ...results });
+      });
+    };
+
+    const guardLocations = (next) => {
+      db.get('SELECT id FROM locations WHERE id = ?', [fromId], (e1, a) => {
+        if (e1) return finalize(e1);
+        if (!a) return finalize(new Error('Sede origen no existe'));
+        db.get('SELECT id FROM locations WHERE id = ?', [toId], (e2, b) => {
+          if (e2) return finalize(e2);
+          if (!b) return finalize(new Error('Sede destino no existe'));
+          next();
+        });
+      });
+    };
+
+    guardLocations(() => {
+      const proceedTables = () => {
+        if (!includeTables) return finalize();
+        // Insertar mesas que no existan por nombre en destino
+        const insertTablesSql = `
+          INSERT INTO tables (name, type, capacity, status, location_id)
+          SELECT s.name, s.type, s.capacity, 'free', ?
+          FROM tables s
+          WHERE s.location_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tables d WHERE d.location_id = ? AND d.name = s.name
+          )`;
+        db.run(insertTablesSql, [toId, fromId, toId], function(err){
+          if (err) return finalize(err);
+          results.tablesInserted = this.changes || 0;
+          finalize();
+        });
+      };
+
+      const proceedProducts = () => {
+        if (!includeProducts) return proceedTables();
+
+        if (overwrite) {
+          // Actualizar existentes por nombre
+          const updateSql = `
+            UPDATE products AS d
+            SET price = s.price,
+                stock = ${copyStock ? 's.stock' : '0'},
+                category = s.category
+            FROM products AS s
+            WHERE d.location_id = ? AND s.location_id = ? AND d.name = s.name`;
+          // SQLite no soporta UPDATE ... FROM nativo; usar approach por subquery
+          const updateCompatSql = `
+            UPDATE products
+            SET price = (
+                  SELECT s.price FROM products s WHERE s.location_id = ? AND s.name = products.name
+                ),
+                stock = (
+                  SELECT ${copyStock ? 's.stock' : '0'} FROM products s WHERE s.location_id = ? AND s.name = products.name
+                ),
+                category = (
+                  SELECT s.category FROM products s WHERE s.location_id = ? AND s.name = products.name
+                )
+            WHERE location_id = ? AND name IN (
+              SELECT name FROM products WHERE location_id = ?
+            )`;
+          db.run(updateCompatSql, [fromId, fromId, fromId, toId, fromId], function(err){
+            if (err) return finalize(err);
+            results.productsUpdated = this.changes || 0;
+            // Insertar faltantes
+            const insertSql = `
+              INSERT INTO products (name, price, stock, category, location_id)
+              SELECT s.name, s.price, ${copyStock ? 's.stock' : '0'}, s.category, ?
+              FROM products s
+              WHERE s.location_id = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM products d WHERE d.location_id = ? AND d.name = s.name
+              )`;
+            db.run(insertSql, [toId, fromId, toId], function(err2){
+              if (err2) return finalize(err2);
+              results.productsInserted = this.changes || 0;
+              proceedTables();
+            });
+          });
+        } else {
+          // Solo insertar faltantes
+          const insertSql = `
+            INSERT INTO products (name, price, stock, category, location_id)
+            SELECT s.name, s.price, ${copyStock ? 's.stock' : '0'}, s.category, ?
+            FROM products s
+            WHERE s.location_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM products d WHERE d.location_id = ? AND d.name = s.name
+            )`;
+          db.run(insertSql, [toId, fromId, toId], function(err){
+            if (err) return finalize(err);
+            results.productsInserted = this.changes || 0;
+            proceedTables();
+          });
+        }
+      };
+
+      proceedProducts();
     });
   });
 });
