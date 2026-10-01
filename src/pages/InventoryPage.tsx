@@ -60,7 +60,7 @@ function Products() {
               <tr key={p.id} className={cn(p.is_active === 0 && 'opacity-50')}>
                 <td className="font-medium">{p.name}{p.is_active === 0 && <Badge tone="muted" className="ml-2">Inactivo</Badge>}</td>
                 <td className="text-fg-muted">{p.category_name ?? '—'}</td>
-                <td className="text-right tabular-nums text-gold font-semibold">{money(p.price)}</td>
+                <td className="text-right tabular-nums"><button type="button" onClick={() => setEditing(p)} title="Editar precio" className="rounded-lg px-2 py-1 font-semibold text-gold hover:bg-surface-3">{money(p.price)}</button></td>
                 <td className="text-right tabular-nums">{p.track_stock === 1 ? <button type="button" onClick={() => setStockOf(p)} className={cn('rounded-lg px-2 py-1 font-semibold hover:bg-surface-3', p.stock <= 0 ? 'text-danger' : p.stock <= 5 ? 'text-warn' : 'text-fg')}>{p.stock}</button> : <span className="text-xs text-fg-faint">sin control</span>}</td>
                 <td className="text-right whitespace-nowrap">
                   <button type="button" className="rounded-lg p-2 text-fg-muted hover:text-fg" aria-label="Ajustar stock" title="Ajustar inventario" onClick={() => setStockOf(p)} disabled={p.track_stock === 0}><PackagePlus className="h-4 w-4" /></button>
