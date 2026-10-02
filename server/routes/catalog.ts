@@ -9,7 +9,7 @@ import type { Category, Product } from '../../shared/types.js';
 const catalog = new Hono<Env>();
 
 const PRODUCT_SELECT = `
-  SELECT p.id, p.name, p.price, p.category_id, c.name AS category_name, p.stock, p.track_stock, p.is_active
+  SELECT p.id, p.name, p.price, p.category_id, c.name AS category_name, p.stock, p.track_stock, p.is_active, p.promo_price
   FROM products p LEFT JOIN categories c ON c.id = p.category_id`;
 
 // ---------- Categorías ----------
@@ -92,6 +92,8 @@ const productSchema = z.object({
   stock: z.number().int().optional(),
   track_stock: z.boolean().optional(),
   is_active: z.boolean().optional(),
+  /** Precio 2x1 por las 2 botellas. Par, para que cada botella quede a un valor exacto. */
+  promo_price: z.number().positive('Precio 2x1 inválido').refine((n) => Math.round(n) % 2 === 0, 'El precio 2x1 debe ser un valor par').nullable().optional(),
 });
 
 catalog.post('/products', requireAdmin, async (c) => {
@@ -99,8 +101,8 @@ catalog.post('/products', requireAdmin, async (c) => {
   const ts = nowIso();
   const { lastId } = await run(
     getClient(),
-    'INSERT INTO products (name, price, category_id, stock, track_stock, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [body.name, cop(body.price), body.category_id ?? null, body.stock ?? 0, body.track_stock === false ? 0 : 1, body.is_active === false ? 0 : 1, ts, ts],
+    'INSERT INTO products (name, price, category_id, stock, track_stock, is_active, promo_price, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [body.name, cop(body.price), body.category_id ?? null, body.stock ?? 0, body.track_stock === false ? 0 : 1, body.is_active === false ? 0 : 1, body.promo_price ? cop(body.promo_price) : null, ts, ts],
   );
   return c.json({ id: lastId }, 201);
 });
@@ -120,11 +122,12 @@ catalog.put('/products/:id', requireAdmin, async (c) => {
     }
     await run(
       tx,
-      'UPDATE products SET name = ?, price = ?, category_id = ?, stock = ?, track_stock = ?, is_active = ?, updated_at = ? WHERE id = ?',
+      'UPDATE products SET name = ?, price = ?, category_id = ?, stock = ?, track_stock = ?, is_active = ?, promo_price = ?, updated_at = ? WHERE id = ?',
       [
         body.name, cop(body.price), body.category_id ?? null, newStock,
         body.track_stock === undefined ? Number(current.track_stock) : (body.track_stock ? 1 : 0),
         body.is_active === undefined ? Number(current.is_active) : (body.is_active ? 1 : 0),
+        body.promo_price === undefined ? current.promo_price : body.promo_price ? cop(body.promo_price) : null,
         nowIso(), id,
       ],
     );

@@ -36,7 +36,7 @@ export function ReceiptPage() {
             {o.items.map((it) => (
               <tr key={it.id} className="align-top">
                 <td className="pr-1">{it.quantity}×</td>
-                <td className="w-full">{it.product_name}{it.notes && <div className="text-[10px] italic">{it.notes}</div>}</td>
+                <td className="w-full">{it.product_name}{it.promo === 1 && ' (2x1)'}{it.notes && <div className="text-[10px] italic">{it.notes}</div>}</td>
                 <td className="whitespace-nowrap text-right">{money(it.unit_price * it.quantity)}</td>
               </tr>
             ))}

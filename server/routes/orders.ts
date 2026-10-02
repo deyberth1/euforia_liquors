@@ -111,9 +111,42 @@ orders.post('/orders', async (c) => {
 // ---------- Ítems ----------
 const addItemSchema = z.object({
   product_id: z.number().int().positive(),
+  /** Cuántas unidades; en 2x1, cuántos pares (cada par son 2 botellas). */
   quantity: z.number().int().min(1).max(500).default(1),
   notes: z.string().trim().max(120).optional(),
+  /** Vender en 2x1: se agregan 2 botellas por par al precio 2x1 del producto. */
+  promo: z.boolean().optional(),
 });
+
+type SellableProduct = { id: number; name: string; price: number; stock: number; track_stock: number; is_active: number; promo_price: number | null };
+const SELLABLE_SELECT = 'SELECT id, name, price, stock, track_stock, is_active, promo_price FROM products WHERE id = ?';
+
+/**
+ * Agrega `units` botellas de un producto a la cuenta y las descuenta del inventario.
+ * En 2x1 cada botella queda a la mitad del precio 2x1, así reportes, caja e inventario cuadran solos.
+ */
+async function addProduct(tx: Db, orderId: number, product: SellableProduct, units: number, promo: boolean, notes: string | null, userId: number) {
+  if (Number(product.track_stock) === 1 && Number(product.stock) < units) {
+    throw conflict(`Solo hay ${product.stock} unidades de ${product.name}`);
+  }
+  const unitPrice = promo ? Number(product.promo_price) / 2 : Number(product.price);
+  // Misma persona, mismo producto y precio, sin nota: sumamos cantidades en vez de duplicar líneas.
+  const existing = !notes ? await one<{ id: number }>(
+    tx,
+    'SELECT id FROM order_items WHERE order_id = ? AND product_id = ? AND added_by = ? AND notes IS NULL AND unit_price = ? AND promo = ?',
+    [orderId, product.id, userId, unitPrice, promo ? 1 : 0],
+  ) : null;
+  if (existing) {
+    await run(tx, 'UPDATE order_items SET quantity = quantity + ? WHERE id = ?', [units, existing.id]);
+  } else {
+    await run(
+      tx,
+      'INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity, notes, promo, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [orderId, product.id, product.name, unitPrice, units, notes, promo ? 1 : 0, userId, nowIso()],
+    );
+  }
+  await moveStock(tx, product.id, -units, promo ? 'Venta 2x1' : 'Venta', orderId, userId);
+}
 
 orders.post('/orders/:id/items', async (c) => {
   const user = c.get('user');
@@ -123,30 +156,11 @@ orders.post('/orders/:id/items', async (c) => {
     const order = await one<{ status: string }>(tx, 'SELECT status FROM orders WHERE id = ?', [orderId]);
     if (!order) throw notFound('Cuenta no encontrada');
     if (order.status !== 'open') throw conflict('La cuenta ya está cerrada');
-    const product = await one<{ id: number; name: string; price: number; stock: number; track_stock: number; is_active: number }>(
-      tx, 'SELECT id, name, price, stock, track_stock, is_active FROM products WHERE id = ?', [body.product_id],
-    );
+    const product = await one<SellableProduct>(tx, SELLABLE_SELECT, [body.product_id]);
     if (!product || Number(product.is_active) !== 1) throw notFound('Producto no disponible');
-    if (Number(product.track_stock) === 1 && Number(product.stock) < body.quantity) {
-      throw conflict(`Solo hay ${product.stock} unidades de ${product.name}`);
-    }
-    const notes = body.notes || null;
-    // Misma persona, mismo producto, sin nota: sumamos cantidades en vez de duplicar líneas.
-    const existing = await one<{ id: number }>(
-      tx,
-      'SELECT id FROM order_items WHERE order_id = ? AND product_id = ? AND added_by = ? AND notes IS NULL AND unit_price = ?',
-      [orderId, product.id, user.id, product.price],
-    );
-    if (existing && !notes) {
-      await run(tx, 'UPDATE order_items SET quantity = quantity + ? WHERE id = ?', [body.quantity, existing.id]);
-    } else {
-      await run(
-        tx,
-        'INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity, notes, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [orderId, product.id, product.name, product.price, body.quantity, notes, user.id, nowIso()],
-      );
-    }
-    await moveStock(tx, product.id, -body.quantity, 'Venta', orderId, user.id);
+    const promo = body.promo === true;
+    if (promo && !product.promo_price) throw badRequest(`${product.name} no tiene precio 2x1`);
+    await addProduct(tx, orderId, product, promo ? body.quantity * 2 : body.quantity, promo, body.notes || null, user.id);
     await recalc(tx, orderId);
   });
   return c.json(await loadOrder(getClient(), orderId));
@@ -165,6 +179,7 @@ orders.patch('/orders/:id/items/:itemId', requireAdmin, async (c) => {
     if (order.status !== 'open') throw conflict('La cuenta ya está cerrada');
     const item = await one<OrderItem>(tx, 'SELECT * FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId]);
     if (!item) throw notFound('Ítem no encontrado');
+    if (Number(item.promo) === 1 && body.quantity % 2 !== 0) throw badRequest('Una línea 2x1 va de 2 en 2 botellas');
     const delta = body.quantity - Number(item.quantity);
     if (delta > 0) {
       const p = await one<{ stock: number; track_stock: number }>(tx, 'SELECT stock, track_stock FROM products WHERE id = ?', [item.product_id]);
@@ -228,19 +243,11 @@ orders.post('/orders/:id/repeat-last', async (c) => {
     const since = new Date(new Date(last.created_at).getTime() - 120_000).toISOString();
     const round = await all<OrderItem>(tx, 'SELECT * FROM order_items WHERE order_id = ? AND created_at >= ? AND product_id IS NOT NULL', [orderId, since]);
     for (const it of round) {
-      const p = await one<{ id: number; name: string; price: number; stock: number; track_stock: number; is_active: number }>(tx, 'SELECT id, name, price, stock, track_stock, is_active FROM products WHERE id = ?', [it.product_id]);
+      const p = await one<SellableProduct>(tx, SELLABLE_SELECT, [it.product_id]);
       if (!p || Number(p.is_active) !== 1) continue;
-      if (Number(p.track_stock) === 1 && Number(p.stock) < Number(it.quantity)) throw conflict(`Solo hay ${p.stock} unidades de ${p.name}`);
-      // Misma línea (mi producto, sin nota, mismo precio): sumamos en vez de duplicar.
-      const existing = !it.notes ? await one<{ id: number }>(tx, 'SELECT id FROM order_items WHERE order_id = ? AND product_id = ? AND added_by = ? AND notes IS NULL AND unit_price = ?', [orderId, p.id, user.id, p.price]) : null;
-      if (existing) {
-        await run(tx, 'UPDATE order_items SET quantity = quantity + ? WHERE id = ?', [Number(it.quantity), existing.id]);
-      } else {
-        await run(tx, 'INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity, notes, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
-          orderId, p.id, p.name, p.price, Number(it.quantity), it.notes, user.id, nowIso(),
-        ]);
-      }
-      await moveStock(tx, p.id, -Number(it.quantity), 'Venta', orderId, user.id);
+      // Un 2x1 se repite como 2x1 mientras el producto siga teniendo precio 2x1.
+      const promo = Number(it.promo) === 1 && !!p.promo_price;
+      await addProduct(tx, orderId, p, Number(it.quantity), promo, it.notes, user.id);
     }
     await recalc(tx, orderId);
   });

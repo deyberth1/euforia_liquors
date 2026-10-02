@@ -36,6 +36,8 @@ export interface Product {
   stock: number;
   track_stock: number;
   is_active: number;
+  /** Precio de la promoción 2x1 (por las 2 botellas). null = sin 2x1. */
+  promo_price: number | null;
 }
 
 export interface TableRow {
@@ -78,6 +80,8 @@ export interface OrderItem {
   unit_price: number;
   quantity: number;
   notes: string | null;
+  /** 1 = vendido en 2x1: quantity son botellas (de 2 en 2) y unit_price es la mitad del precio 2x1. */
+  promo: number;
   added_by: number;
   added_by_name: string;
   created_at: string;

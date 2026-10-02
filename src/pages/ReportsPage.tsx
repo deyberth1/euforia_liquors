@@ -129,7 +129,7 @@ function OrderItemsView({ order }: { order: Order }) {
     <div className="space-y-3 text-sm">
       <p className="text-fg-muted">Abrió {o.opened_by_name} · {fmtDateTime(o.opened_at)}<br />{o.status === 'paid' ? `Cobró ${o.closed_by_name} · ${fmtDateTime(o.closed_at)} · ${PAYMENT_LABEL[o.payment_method ?? '']}` : `Cancelada por ${o.closed_by_name} · ${fmtDateTime(o.closed_at)}`}</p>
       <ul className="divide-y divide-line rounded-xl border border-line">
-        {(o.items ?? []).map((it) => <li key={it.id} className="flex justify-between px-3 py-2"><span>{it.quantity} × {it.product_name}<span className="ml-2 text-xs text-fg-faint">{it.added_by_name.split(' ')[0]}</span></span><span className="tabular-nums">{money(it.quantity * it.unit_price)}</span></li>)}
+        {(o.items ?? []).map((it) => <li key={it.id} className="flex justify-between px-3 py-2"><span>{it.quantity} × {it.product_name}{it.promo === 1 && ' (2x1)'}<span className="ml-2 text-xs text-fg-faint">{it.added_by_name.split(' ')[0]}</span></span><span className="tabular-nums">{money(it.quantity * it.unit_price)}</span></li>)}
       </ul>
       {o.discount > 0 && <div className="flex justify-between text-warn"><span>Descuento</span><span>− {money(o.discount)}</span></div>}
       <div className="flex justify-between text-base font-bold"><span>Total</span><span className="text-gold">{money(o.total)}</span></div>

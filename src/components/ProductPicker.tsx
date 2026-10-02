@@ -9,7 +9,8 @@ import type { Product } from '@shared/types';
 interface Props {
   open: boolean;
   onClose: () => void;
-  onPick: (product: Product, quantity: number, notes?: string) => Promise<void> | void;
+  /** En 2x1 (`promo`), `quantity` son pares: cada par agrega 2 botellas al precio 2x1. */
+  onPick: (product: Product, quantity: number, notes?: string, promo?: boolean) => Promise<void> | void;
   /** Cantidad que ya tiene cada producto en la cuenta (para mostrar − / +). */
   quantities?: Record<number, number>;
   /** Quita una unidad del producto en la cuenta. */
@@ -28,6 +29,7 @@ export function ProductPicker({ open, onClose, onPick, quantities = {}, onRemove
   const [detail, setDetail] = useState<Product | null>(null);
   const [qty, setQty] = useState(1);
   const [notes, setNotes] = useState('');
+  const [promo, setPromo] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
 
   const list = useMemo(() => {
@@ -39,10 +41,11 @@ export function ProductPicker({ open, onClose, onPick, quantities = {}, onRemove
   const favorites = (frequent ?? []).map((id) => (products ?? []).find((p) => p.id === id)).filter((p): p is Product => !!p).slice(0, 6);
   const showFavorites = favorites.length > 0 && cat === 'all' && !q.trim();
   const outOfStock = (p: Product) => p.track_stock === 1 && p.stock <= 0;
+  const noPromoStock = (p: Product) => p.track_stock === 1 && p.stock < 2;
 
-  const add = async (p: Product, n: number, note?: string) => {
+  const add = async (p: Product, n: number, note?: string, asPromo?: boolean) => {
     setBusyId(p.id);
-    try { await onPick(p, n, note); } finally { setBusyId(null); }
+    try { await onPick(p, n, note, asPromo); } finally { setBusyId(null); }
   };
   const remove = async (p: Product) => {
     if (!onRemove) return;
@@ -97,8 +100,14 @@ export function ProductPicker({ open, onClose, onPick, quantities = {}, onRemove
                   <span className="mt-2 text-base font-bold tabular-nums text-gold">{money(p.price)}</span>
                   <span className="mt-0.5 text-[11px] text-fg-faint">{p.track_stock === 1 ? (off ? 'Agotado' : `${p.stock} disp.`) : p.category_name ?? ''}</span>
                 </button>
-                <button type="button" aria-label="Cantidad y nota" onClick={() => { setDetail(p); setQty(1); setNotes(''); }} disabled={off}
+                <button type="button" aria-label="Cantidad y nota" onClick={() => { setDetail(p); setQty(1); setNotes(''); setPromo(false); }} disabled={off}
                   className="absolute right-2 top-2 rounded-lg p-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg"><MoreHorizontal className="h-4 w-4" /></button>
+                {p.promo_price != null && (
+                  <button type="button" disabled={noPromoStock(p) || busy} onClick={() => add(p, 1, undefined, true)} aria-label={`Agregar 2x1 de ${p.name}`}
+                    className="mx-2 mb-2 flex h-9 items-center justify-between rounded-lg border border-gold/40 bg-gold/10 px-2.5 text-xs font-bold text-gold transition hover:bg-gold/20 active:scale-[0.98] disabled:opacity-40">
+                    <span>2x1</span><span className="tabular-nums">{money(p.promo_price)}</span>
+                  </button>
+                )}
                 {count > 0 && (
                   <div className="flex items-center justify-between border-t border-gold/25 px-1.5 py-1.5">
                     <button type="button" disabled={busy || !onRemove} onClick={() => remove(p)} className="flex h-9 w-11 items-center justify-center rounded-lg bg-surface-3 text-fg hover:bg-danger/20 hover:text-danger" aria-label="Quitar uno"><Minus className="h-4 w-4" /></button>
@@ -113,14 +122,21 @@ export function ProductPicker({ open, onClose, onPick, quantities = {}, onRemove
       )}
 
       <Modal open={!!detail} onClose={() => setDetail(null)} title={detail?.name} size="sm"
-        footer={<Button full variant="primary" size="lg" loading={busyId === detail?.id} onClick={async () => { if (detail) { await add(detail, qty, notes.trim() || undefined); setDetail(null); } }}>
-          Agregar {qty} · {money((detail?.price ?? 0) * qty)}</Button>}>
+        footer={<Button full variant="primary" size="lg" loading={busyId === detail?.id} onClick={async () => { if (detail) { await add(detail, qty, notes.trim() || undefined, promo); setDetail(null); } }}>
+          {promo ? `Agregar ${qty} × 2x1 · ${money((detail?.promo_price ?? 0) * qty)}` : `Agregar ${qty} · ${money((detail?.price ?? 0) * qty)}`}</Button>}>
         <div className="space-y-4">
+          {detail?.promo_price != null && (
+            <label className={cn('flex items-center gap-3 rounded-xl border p-3 text-sm transition', promo ? 'border-gold bg-gold/10' : 'border-line bg-surface-2', noPromoStock(detail) && 'opacity-50')}>
+              <input type="checkbox" className="h-5 w-5 accent-gold" checked={promo} disabled={noPromoStock(detail)} onChange={(e) => setPromo(e.target.checked)} />
+              <span><b>2x1</b><span className="block text-xs text-fg-muted">2 botellas por {money(detail.promo_price)}. Se descuentan las 2 del inventario.</span></span>
+            </label>
+          )}
           <div className="flex items-center justify-center gap-4 py-2">
             <Button size="lg" onClick={() => setQty((n) => Math.max(1, n - 1))} icon={Minus} aria-label="Menos" />
             <span className="w-12 text-center text-3xl font-bold tabular-nums">{qty}</span>
             <Button size="lg" onClick={() => setQty((n) => Math.min(99, n + 1))} icon={Plus} aria-label="Más" />
           </div>
+          {promo && <p className="-mt-2 text-center text-xs text-fg-muted">{qty} {qty === 1 ? 'par' : 'pares'} = {qty * 2} botellas</p>}
           <Field label="Nota para la cuenta (opcional)"><Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ej: sin hielo, para llevar…" maxLength={120} /></Field>
         </div>
       </Modal>

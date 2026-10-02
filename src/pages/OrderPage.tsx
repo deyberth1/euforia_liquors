@@ -27,7 +27,7 @@ export function OrderPage() {
   const [request, setRequest] = useState(false);
 
   const invalidate = [keys.order(id), ...ORDER_RELATED];
-  const addItem = useInvalidatingMutation((b: { product_id: number; quantity: number; notes?: string }) => api.post<Order>(`/orders/${id}/items`, b), invalidate);
+  const addItem = useInvalidatingMutation((b: { product_id: number; quantity: number; notes?: string; promo?: boolean }) => api.post<Order>(`/orders/${id}/items`, b), invalidate);
   const setQty = useInvalidatingMutation((b: { itemId: number; quantity: number }) => api.patch<Order>(`/orders/${id}/items/${b.itemId}`, { quantity: b.quantity }), invalidate);
   const cancel = useInvalidatingMutation(() => api.post<Order>(`/orders/${id}/cancel`), invalidate);
   const voidPaid = useInvalidatingMutation(() => api.post<Order>(`/orders/${id}/void`), invalidate);
@@ -40,8 +40,8 @@ export function OrderPage() {
   const requested = open && !!order.bill_requested_at;
   const vibrate = () => { try { navigator.vibrate?.(15); } catch { /* sin soporte */ } };
 
-  const onPick = async (p: Product, quantity: number, notes?: string) => {
-    try { await addItem.mutateAsync({ product_id: p.id, quantity, notes }); vibrate(); toast.success(`${quantity} × ${p.name}`); }
+  const onPick = async (p: Product, quantity: number, notes?: string, promo?: boolean) => {
+    try { await addItem.mutateAsync({ product_id: p.id, quantity, notes, promo }); vibrate(); toast.success(promo ? `${quantity} × 2x1 ${p.name}` : `${quantity} × ${p.name}`); }
     catch (e) { toast.error((e as Error).message); throw e; }
   };
 
@@ -74,11 +74,11 @@ export function OrderPage() {
   const editable = order.items.filter(canEdit);
   const quantities = editable.reduce<Record<number, number>>((acc, it) => { if (it.product_id) acc[it.product_id] = (acc[it.product_id] ?? 0) + it.quantity; return acc; }, {});
   const removeOne = async (p: Product) => {
-    // Preferimos la línea sin nota agregada por mí; si no, cualquiera que pueda editar.
+    // Preferimos la línea normal sin nota agregada por mí; si no, cualquiera que pueda editar (un 2x1 se quita de a par).
     const candidates = editable.filter((it) => it.product_id === p.id);
-    const item = candidates.find((it) => !it.notes && it.added_by === user?.id) ?? candidates[0];
+    const item = candidates.find((it) => !it.promo && !it.notes && it.added_by === user?.id) ?? candidates.find((it) => !it.promo) ?? candidates[0];
     if (!item) return;
-    try { await setQty.mutateAsync({ itemId: item.id, quantity: item.quantity - 1 }); }
+    try { await setQty.mutateAsync({ itemId: item.id, quantity: item.quantity - step(item) }); }
     catch (e) { toast.error((e as Error).message); throw e; }
   };
 
@@ -121,17 +121,17 @@ export function OrderPage() {
             <li key={it.id} className="px-4 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <div className="font-semibold leading-snug">{it.product_name}</div>
-                  <div className="mt-0.5 text-xs text-fg-muted tabular-nums">{it.quantity} × {money(it.unit_price)} · {it.added_by_name.split(' ')[0]} · {fmtTime(it.created_at)}</div>
+                  <div className="font-semibold leading-snug">{it.product_name}{it.promo === 1 && <Badge tone="gold" className="ml-2 align-middle">2x1</Badge>}</div>
+                  <div className="mt-0.5 text-xs text-fg-muted tabular-nums">{it.promo === 1 ? `${it.quantity / 2} × 2x1 de ${money(it.unit_price * 2)} (${it.quantity} und.)` : `${it.quantity} × ${money(it.unit_price)}`} · {it.added_by_name.split(' ')[0]} · {fmtTime(it.created_at)}</div>
                   {it.notes && <div className="mt-0.5 text-xs text-warn">{it.notes}</div>}
                 </div>
                 <div className="shrink-0 text-right font-semibold tabular-nums">{money(it.unit_price * it.quantity)}</div>
               </div>
               {canEdit(it) ? (
                 <div className="mt-2 flex items-center justify-end gap-1">
-                  <button type="button" onClick={() => changeQty(it, it.quantity - 1)} disabled={setQty.isPending} className="flex h-10 w-12 items-center justify-center rounded-lg bg-surface-2 text-fg-muted hover:text-fg active:bg-surface-3" aria-label={it.quantity === 1 ? 'Quitar' : 'Menos'}>{it.quantity === 1 ? <Trash2 className="h-4 w-4 text-danger" /> : <Minus className="h-4 w-4" />}</button>
+                  <button type="button" onClick={() => changeQty(it, it.quantity - step(it))} disabled={setQty.isPending} className="flex h-10 w-12 items-center justify-center rounded-lg bg-surface-2 text-fg-muted hover:text-fg active:bg-surface-3" aria-label={it.quantity === step(it) ? 'Quitar' : 'Menos'}>{it.quantity === step(it) ? <Trash2 className="h-4 w-4 text-danger" /> : <Minus className="h-4 w-4" />}</button>
                   <span className="w-10 text-center text-lg font-bold tabular-nums">{it.quantity}</span>
-                  <button type="button" onClick={() => changeQty(it, it.quantity + 1)} disabled={setQty.isPending} className="flex h-10 w-12 items-center justify-center rounded-lg bg-surface-2 text-fg-muted hover:text-fg active:bg-surface-3" aria-label="Más"><Plus className="h-4 w-4" /></button>
+                  <button type="button" onClick={() => changeQty(it, it.quantity + step(it))} disabled={setQty.isPending} className="flex h-10 w-12 items-center justify-center rounded-lg bg-surface-2 text-fg-muted hover:text-fg active:bg-surface-3" aria-label="Más"><Plus className="h-4 w-4" /></button>
                 </div>
               ) : null}
             </li>
@@ -198,6 +198,9 @@ export function OrderPage() {
     </div>
   );
 }
+
+/** Las líneas 2x1 se suben o bajan de a par (2 botellas). */
+const step = (it: OrderItem) => (it.promo === 1 ? 2 : 1);
 
 function Row({ label, value, className }: { label: string; value: string; className?: string }) {
   return <div className={cn('flex justify-between text-fg-muted', className)}><span>{label}</span><span className="tabular-nums">{value}</span></div>;

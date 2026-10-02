@@ -60,7 +60,7 @@ function Products() {
               <tr key={p.id} className={cn(p.is_active === 0 && 'opacity-50')}>
                 <td className="font-medium">{p.name}{p.is_active === 0 && <Badge tone="muted" className="ml-2">Inactivo</Badge>}</td>
                 <td className="text-fg-muted">{p.category_name ?? '—'}</td>
-                <td className="text-right tabular-nums"><button type="button" onClick={() => setEditing(p)} title="Editar precio" className="rounded-lg px-2 py-1 font-semibold text-gold hover:bg-surface-3">{money(p.price)}</button></td>
+                <td className="text-right tabular-nums"><button type="button" onClick={() => setEditing(p)} title="Editar precio" className="rounded-lg px-2 py-1 font-semibold text-gold hover:bg-surface-3">{money(p.price)}{p.promo_price != null && <span className="block text-[11px] font-medium text-fg-muted">2x1 {money(p.promo_price)}</span>}</button></td>
                 <td className="text-right tabular-nums">{p.track_stock === 1 ? <button type="button" onClick={() => setStockOf(p)} className={cn('rounded-lg px-2 py-1 font-semibold hover:bg-surface-3', p.stock <= 0 ? 'text-danger' : p.stock <= 5 ? 'text-warn' : 'text-fg')}>{p.stock}</button> : <span className="text-xs text-fg-faint">sin control</span>}</td>
                 <td className="text-right whitespace-nowrap">
                   <button type="button" className="rounded-lg p-2 text-fg-muted hover:text-fg" aria-label="Ajustar stock" title="Ajustar inventario" onClick={() => setStockOf(p)} disabled={p.track_stock === 0}><PackagePlus className="h-4 w-4" /></button>
@@ -86,22 +86,26 @@ function ProductModal({ open, onClose, product, categories }: { open: boolean; o
   const [track, setTrack] = useState(product ? product.track_stock === 1 : true);
   const [stock, setStock] = useState(String(product?.stock ?? 0));
   const [active, setActive] = useState(product ? product.is_active === 1 : true);
+  const [promo, setPromo] = useState<number | null>(product?.promo_price ?? null);
   const m = useInvalidatingMutation((b: object) => (product ? api.put(`/products/${product.id}`, b) : api.post('/products', b)), PRODUCT_KEYS);
   const submit = async () => {
     try {
-      await m.mutateAsync({ name: name.trim(), price: price ?? 0, category_id: catId ? Number(catId) : null, track_stock: track, stock: track ? Number(stock) || 0 : 0, is_active: active });
+      await m.mutateAsync({ name: name.trim(), price: price ?? 0, category_id: catId ? Number(catId) : null, track_stock: track, stock: track ? Number(stock) || 0 : 0, is_active: active, promo_price: promo || null });
       toast.success(product ? 'Producto actualizado' : 'Producto creado'); onClose();
     } catch (e) { toast.error((e as Error).message); }
   };
   return (
     <Modal open={open} onClose={onClose} title={product ? 'Editar producto' : 'Nuevo producto'} size="sm"
-      footer={<Button full size="lg" variant="primary" loading={m.isPending} disabled={!name.trim() || price == null} onClick={submit}>Guardar</Button>}>
+      footer={<Button full size="lg" variant="primary" loading={m.isPending} disabled={!name.trim() || price == null || (promo != null && promo % 2 !== 0)} onClick={submit}>Guardar</Button>}>
       <div className="space-y-4">
         <Field label="Nombre"><Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej: Cerveza Corona 355ml" maxLength={80} /></Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Precio de venta"><MoneyInput value={price} onChange={setPrice} /></Field>
           <Field label="Categoría"><Select value={catId} onChange={(e) => setCatId(e.target.value)}><option value="">Sin categoría</option>{categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
         </div>
+        <Field label="Precio 2x1 (opcional)" hint="Lo que paga el cliente por las 2 botellas. Si lo llenas, los meseros verán el botón 2x1 en este producto." error={promo != null && promo % 2 !== 0 ? 'Debe ser un valor par' : undefined}>
+          <MoneyInput value={promo} onChange={setPromo} placeholder="Sin 2x1" />
+        </Field>
         <label className="flex items-center gap-3 rounded-xl border border-line bg-surface-2 p-3 text-sm"><input type="checkbox" className="h-4 w-4 accent-gold" checked={track} onChange={(e) => setTrack(e.target.checked)} /><span><b>Controlar inventario</b><span className="block text-xs text-fg-muted">Desactívalo para cócteles o preparados sin stock fijo.</span></span></label>
         {track && <Field label={product ? 'Stock actual (corrige si es necesario)' : 'Stock inicial'}><Input type="number" inputMode="numeric" min={0} value={stock} onChange={(e) => setStock(e.target.value)} /></Field>}
         {product && <label className="flex items-center gap-3 text-sm"><input type="checkbox" className="h-4 w-4 accent-gold" checked={active} onChange={(e) => setActive(e.target.checked)} />Producto activo (visible para los meseros)</label>}

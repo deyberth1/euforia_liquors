@@ -246,6 +246,10 @@ export async function migrateSchema(): Promise<Client> {
   await rebuildOrdersIfNeeded(client);
   await addColumnIfMissing(client, 'credits', 'order_id', 'INTEGER');
   await addColumnIfMissing(client, 'users', 'last_seen_at', 'TEXT');
+  // Promoción 2x1: precio por las 2 botellas (NULL = el producto no tiene 2x1).
+  await addColumnIfMissing(client, 'products', 'promo_price', 'INTEGER');
+  // 1 = la línea se vendió en 2x1 (cantidad en botellas, siempre par; unit_price = promo_price / 2).
+  await addColumnIfMissing(client, 'order_items', 'promo', 'INTEGER NOT NULL DEFAULT 0');
   return client;
 }
 
